@@ -27,7 +27,8 @@ jobs:
       # dApp drives any network switching itself.
       SEED_PHRASE: ${{ secrets.SEED_PHRASE }}
       WALLET_PASSWORD: ${{ secrets.WALLET_PASSWORD }}
-      DAPP_URL: https://app.aave.com/?testnet=true
+      # Aave's only live testnet market (Ethereum Sepolia has been retired).
+      DAPP_URL: https://app.aave.com/?marketName=proto_base_sepolia_v3
 
     steps:
       - uses: actions/checkout@v4

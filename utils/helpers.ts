@@ -39,6 +39,12 @@ export async function connectWallet(
   await mmOption.click()
 
   await mm.connectToDapp(context, extensionId)
+
+  // Approving the connection is not the end of it: the market runs on Base
+  // Sepolia, which MetaMask doesn't ship with, so Aave immediately asks the
+  // wallet to add that network and switch to it. Until those are approved the
+  // dApp stays on "Requesting Connection" and never reports a connected account.
+  await mm.approveFollowUpRequests(context, extensionId)
 }
 
 /** Assert the dApp shows a connected account (a 0x… address in the header). */

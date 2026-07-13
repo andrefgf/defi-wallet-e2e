@@ -56,6 +56,24 @@ export const test = base.extend<MetaMaskFixtures>({
       args: browserArgs(),
     })
 
+    // Aave only reveals its testnet markets (and the Faucet) when testnet mode
+    // is on, and that flag lives in localStorage — the `?testnet=true` query
+    // param does NOT do it. Without this the app quietly serves the MAINNET
+    // market instead, where there is no faucet and no test tokens.
+    //
+    // Guarded by hostname: init scripts run on EVERY page in the context,
+    // including MetaMask's own chrome-extension:// pages, where touching
+    // localStorage trips LavaMoat and leaves the extension rendering blank.
+    await context.addInitScript(() => {
+      try {
+        if (window.location.hostname.endsWith('aave.com')) {
+          window.localStorage.setItem('testnetsEnabled', 'true')
+        }
+      } catch {
+        // never let this break the page under test
+      }
+    })
+
     await use(context)
 
     await context.close()

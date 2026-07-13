@@ -36,7 +36,9 @@ export default defineConfig({
     : [['html', { open: 'never' }], ['list']],
 
   use: {
-    baseURL: process.env.DAPP_URL ?? 'https://app.aave.com/?testnet=true',
+    // Aave's only live testnet market is Base Sepolia; testnet mode itself is a
+    // localStorage flag set by the fixture (see fixtures/metamask.ts).
+    baseURL: process.env.DAPP_URL ?? 'https://app.aave.com/?marketName=proto_base_sepolia_v3',
     trace: 'retain-on-failure',
     screenshot: 'only-on-failure',
     video: 'retain-on-failure',
