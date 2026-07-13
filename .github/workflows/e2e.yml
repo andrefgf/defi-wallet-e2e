@@ -17,18 +17,36 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 30
     env:
-      # Synpress runs headed by default; force headless and let xvfb provide a
-      # display (Chromium extensions still need an X server even headless=new).
+      # Chromium extensions need a display server even with --headless=new, so
+      # the browser steps run under xvfb.
       HEADLESS: "true"
       # Secrets come from GitHub repository secrets — never the repo.
+      # Only these two are needed: the wallet is imported from the seed, and the
+      # dApp drives any network switching itself.
       SEED_PHRASE: ${{ secrets.SEED_PHRASE }}
       WALLET_PASSWORD: ${{ secrets.WALLET_PASSWORD }}
-      SEPOLIA_RPC_URL: ${{ secrets.SEPOLIA_RPC_URL }}
-      NETWORK: sepolia
       DAPP_URL: https://app.aave.com/?testnet=true
 
     steps:
       - uses: actions/checkout@v4
+
+      # Fail immediately with a clear message rather than 3 minutes later with
+      # a confusing "SEED_PHRASE is not set" from deep inside the cache builder.
+      - name: Check required secrets are configured
+        run: |
+          missing=0
+          for name in SEED_PHRASE WALLET_PASSWORD; do
+            if [ -z "${!name}" ]; then
+              echo "::error::Repository secret $name is not set."
+              missing=1
+            fi
+          done
+          if [ "$missing" = "1" ]; then
+            echo "Add them under Settings → Secrets and variables → Actions."
+            echo "Use a THROWAWAY wallet only — see README → Security notes."
+            exit 1
+          fi
+          echo "Required secrets are present."
 
       - uses: pnpm/action-setup@v4
         with:
@@ -75,8 +93,13 @@ jobs:
       - name: Build wallet cache (headless)
         run: xvfb-run --auto-servernum pnpm run build:cache:headless
 
+      # Runs the VERIFIED specs only (connection.spec.ts). The supply/borrow/
+      # repay/withdraw and edge-case specs need a wallet funded with Sepolia ETH
+      # + Aave faucet tokens and still have unverified selectors — running them
+      # here would make the badge red for reasons unrelated to the code under
+      # test. Move them into `test:ci` as each one is confirmed green.
       - name: Run E2E tests (headless)
-        run: xvfb-run --auto-servernum pnpm test
+        run: xvfb-run --auto-servernum pnpm run test:ci
 
       - name: Upload Playwright report
         if: ${{ !cancelled() }}

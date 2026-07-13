@@ -162,7 +162,20 @@ test('connects wallet to the dApp', async ({ context, page, metamask }) => {
 ```
 
 ## CI
-GitHub Actions runs the suite headless on push / PR. Synpress defaults to **headed** mode, so the workflow sets `HEADLESS=true` and runs under `xvfb` (Chromium extensions need a display server). It caches the downloaded MetaMask build and the Playwright browsers. Wallet secrets come from **GitHub repository secrets**, never the repo. Add a status badge to the top of this README once it's green.
+GitHub Actions runs the suite headless on push / PR, under `xvfb` (Chromium extensions need a display server even with `--headless=new`), caching the downloaded MetaMask build and the Playwright browsers.
+
+**Required repository secrets** (Settings → Secrets and variables → Actions) — a throwaway wallet only:
+
+| Secret | Purpose |
+|---|---|
+| `SEED_PHRASE` | The throwaway test wallet to import |
+| `WALLET_PASSWORD` | Password for the in-test MetaMask |
+
+That's all: the wallet is imported from the seed, and the dApp drives any network switching itself, so no RPC URL is needed.
+
+CI runs **`pnpm run test:ci`**, which currently executes the *verified* specs only (`connection.spec.ts`). The supply/borrow/repay/withdraw and edge-case specs need a funded wallet and still have unverified selectors — running them would make the badge red for reasons unrelated to the code under test. Each spec moves into `test:ci` as it is confirmed green. **The badge should only ever claim what actually passes.**
+
+The connection tests spend **no gas**, so CI is free to run on every push.
 
 ## Security notes (read this)
 - Use a **brand-new wallet created only for testing.** It must never hold mainnet assets.
