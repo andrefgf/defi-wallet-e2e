@@ -1,0 +1,6 @@
+# This suite runs on Linux (WSL locally, Ubuntu in CI). Force LF so shell
+# scripts don't get CRLF line endings on a Windows checkout — bash fails with
+# a `\r: command not found` error on CRLF.
+* text=auto eol=lf
+*.sh text eol=lf
+*.png binary
