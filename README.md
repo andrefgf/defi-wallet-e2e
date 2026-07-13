@@ -2,7 +2,7 @@
 
 > Automated end-to-end tests for a real DeFi dApp — covering wallet connection, on-chain transactions, and failure modes — using **Playwright + Synpress + MetaMask**, written in **TypeScript**.
 >
-> **Default target:** Aave v3 on the **Sepolia** testnet. The target dApp is configurable (see *Decision points*).
+> **Target:** Aave v3 on the **Base Sepolia** testnet — Aave's only remaining testnet market (Ethereum Sepolia has been retired from the app).
 
 <!-- Wire these up once CI is green -->
 <!-- ![E2E](https://img.shields.io/badge/e2e-passing-brightgreen) ![Playwright](https://img.shields.io/badge/Playwright-✓-blue) ![TypeScript](https://img.shields.io/badge/TypeScript-✓-blue) -->
@@ -21,10 +21,10 @@ This is a public QA portfolio artifact. In web3, wallet-driven flows are the har
 
 ### Wallet setup & connection
 - Cold connect: import the test wallet, connect MetaMask to the dApp, assert connected account + network.
-- Network switching: prompt and switch to Sepolia; also **reject** the switch and assert graceful handling.
+- Network switching: the dApp asks the wallet to add + switch to Base Sepolia; we approve it, and also **reject** it and assert graceful handling.
 - Disconnect / reconnect.
 
-### Happy path (Aave v3, Sepolia)
+### Happy path (Aave v3, Base Sepolia)
 - Acquire test tokens via the Aave faucet.
 - **Supply** an asset as collateral; assert balances, aToken receipt, and tx confirmation.
 - **Borrow** against collateral; assert borrowed balance + health-factor update.
@@ -48,9 +48,9 @@ This is a public QA portfolio artifact. In web3, wallet-driven flows are the har
 ## Tech stack
 - **Language:** TypeScript
 - **Runner:** Playwright
-- **Web3 wallet automation:** Synpress **v4.x** (`@synthetixio/synpress`) — the "New Dawn" architecture that sets up and **caches** the wallet browser once, enabling fast, parallel runs
-- **Wallet:** MetaMask (managed by Synpress)
-- **Network:** Ethereum **Sepolia** testnet
+- **Web3 wallet automation:** Synpress **4.1.2** (`@synthetixio/synpress`) for the cached-wallet architecture — though most of its runtime turned out to be broken against the MetaMask it ships, and had to be replaced (see *Working around Synpress*)
+- **Wallet:** MetaMask **13.13.1**, driven directly
+- **Network:** **Base Sepolia** testnet (Aave's only live testnet market)
 - **Target dApp:** Aave v3 testnet market (`app.aave.com`, testnet mode)
 - **CI:** GitHub Actions
 
@@ -62,9 +62,9 @@ This is a public QA portfolio artifact. In web3, wallet-driven flows are the har
 - **Linux or macOS — or Windows via WSL2** (see below). The Synpress CLI refuses to run on native Windows.
 - Node.js 18+ and pnpm (or npm)
 - A **dedicated, throwaway** MetaMask wallet — see *Security notes*. **Never** use a wallet that holds real funds.
-- Sepolia ETH for gas (from a public Sepolia faucet)
+- **Base Sepolia** ETH for gas (bridge from Sepolia, or a Base Sepolia faucet) — NOT Ethereum Sepolia ETH
 - Aave test tokens (from the Aave testnet faucet inside the app)
-- A Sepolia RPC URL (Alchemy / Infura / public)
+- (Optional) A Base Sepolia RPC URL, for on-chain assertions
 
 > ### ⚠️ Windows users: use WSL2
 > Synpress's cache builder exits with *"Sorry, Windows is currently not supported. Please use WSL instead!"*, so the suite must be driven from a Linux environment.
@@ -90,11 +90,14 @@ This is a public QA portfolio artifact. In web3, wallet-driven flows are the har
 1. `pnpm install` (installs Playwright + Synpress; Synpress downloads the MetaMask build on first cache run)
 2. Copy `.env.example` → `.env` and fill in:
    ```dotenv
-   SEED_PHRASE=...                              # throwaway TEST wallet only
-   WALLET_PASSWORD=...                          # any value; used for the in-test MetaMask
-   NETWORK=sepolia
-   SEPOLIA_RPC_URL=...
-   DAPP_URL=https://app.aave.com/?testnet=true  # confirm the current testnet entry point
+   SEED_PHRASE=...        # throwaway TEST wallet only
+   WALLET_PASSWORD=...    # any value; used for the in-test MetaMask
+   DAPP_URL=https://app.aave.com/?marketName=proto_base_sepolia_v3
+   ```
+   Then fund the wallet with **Base Sepolia** ETH:
+   ```bash
+   pnpm run wallet:address   # prints the address to fund
+   pnpm run wallet:balance   # checks Base Sepolia + Sepolia balances
    ```
 3. Build the wallet cache: `pnpm run build:cache` (headed) or `pnpm run build:cache:headless`
 4. Run the tests (below)
@@ -115,51 +118,57 @@ pnpm run report        # open the last HTML report
 ```
 .
 ├─ wallet-setup/
-│  ├─ basic.setup.ts        # import wallet, set password, add Sepolia
-│  └─ connected.setup.ts    # wallet already connected to the dApp
+│  └─ basic.setup.ts        # import wallet, finish MetaMask onboarding
 ├─ tests/
 │  ├─ connection.spec.ts
 │  ├─ supply-borrow.spec.ts
 │  ├─ repay-withdraw.spec.ts
 │  └─ edge-cases.spec.ts
 ├─ fixtures/
-│  └─ metamask.ts           # reusable testWithMetaMask fixture
+│  └─ metamask.ts           # testWithMetaMask fixture (replaces Synpress's)
 ├─ utils/
 │  ├─ selectors.ts          # dApp selectors in one place
 │  ├─ metamask-actions.ts   # wallet-popup actions (working MetaMask selectors)
+│  ├─ wallet-cache.ts       # profile paths, launch args, unlock
 │  └─ helpers.ts
 ├─ scripts/
 │  ├─ fetch-metamask.sh     # download + extract MetaMask
 │  ├─ build-cache.ts        # builds & verifies the wallet cache (replaces the CLI)
-│  └─ wallet-address.ts     # prints the test wallet address (for funding)
+│  ├─ wallet-address.ts     # prints the test wallet address (for funding)
+│  └─ check-balance.ts      # Base Sepolia / Sepolia balances
 ├─ .github/workflows/e2e.yml
 ├─ playwright.config.ts
 ├─ .env.example
 └─ README.md
 ```
 
-## Reference: Synpress v4 + Playwright pattern
-_(Matches Synpress 4.1.2; verify against the current version before changing.)_
-```ts
-// fixtures/metamask.ts
-import { testWithSynpress } from '@synthetixio/synpress'
-import { metaMaskFixtures } from '@synthetixio/synpress/playwright'
-import basicSetup from '../wallet-setup/basic.setup'
+## The pattern
 
-export const test = testWithSynpress(metaMaskFixtures(basicSetup))
-export const { expect } = test
-```
+We do **not** use Synpress's `testWithSynpress` / `metaMaskFixtures` — they're broken against the MetaMask they ship (see below). The fixture is our own, and specs read like this:
+
 ```ts
-// a spec — `metamask` is provided ready-to-use by the fixture
 import { test, expect } from '../fixtures/metamask'
+import { connectWallet, expectConnected } from '../utils/helpers'
 
-test('connects wallet to the dApp', async ({ context, page, metamask }) => {
-  await page.goto('/')
-  await page.getByRole('button', { name: /connect wallet/i }).click()
-  await metamask.connectToDapp()
-  // assert connected state...
+// `context` + `extensionId` come from the fixture; the wallet is already
+// imported (from the cached profile) and unlocked.
+test('connects wallet to the dApp', async ({ page, context, extensionId }) => {
+  await connectWallet(page, context, extensionId)
+  await expectConnected(page)
 })
 ```
+
+Wallet popups are driven through `utils/metamask-actions.ts`:
+
+```ts
+import * as mm from '../utils/metamask-actions'
+
+await mm.confirmTransaction(context, extensionId)
+await mm.rejectTransaction(context, extensionId)
+await mm.approveSwitchNetwork(context, extensionId)
+```
+
+Synpress is still used for two things that *do* work: `defineWalletSetup` (which hashes the setup function to key the cache) and its `MetaMask` class for the onboarding/import flow.
 
 ## CI
 GitHub Actions runs the suite headless on push / PR, under `xvfb` (Chromium extensions need a display server even with `--headless=new`), caching the downloaded MetaMask build and the Playwright browsers.
@@ -198,7 +207,7 @@ The connection tests spend **no gas**, so CI is free to run on every push.
 | Suite | State |
 |---|---|
 | `connection.spec.ts` (3 tests) | ✅ **Passing** against live `app.aave.com` with a real MetaMask — **headed and headless** |
-| `supply-borrow` / `repay-withdraw` / `edge-cases` | ⚠️ Written and type-checked, **not yet verified** — they need a wallet funded with Sepolia ETH + Aave faucet tokens, and their Aave selectors (`utils/selectors.ts`) still need confirming against the live UI |
+| `supply-borrow` / `repay-withdraw` / `edge-cases` | ⚠️ Written and type-checked, **not yet verified** — they need a wallet funded with **Base Sepolia** ETH + Aave faucet tokens, and their Aave selectors (`utils/selectors.ts`) still need confirming against the live UI |
 
 The connection flow is the part that proves the hard bit works: a cached MetaMask, unlocked, driving a real dApp, approving and **rejecting** in the wallet popup. The remaining specs reuse exactly that machinery.
 
@@ -244,7 +253,7 @@ All wallet-popup interaction lives in **one file** — [`utils/metamask-actions.
 ## Decision points for André
 
 - [x] **Target dApp — SELECTED: Aave v3 (Sepolia).** Reliable Sepolia testnet, in-app faucet, rich multi-step flows (supply → borrow → repay → withdraw), and documented revert cases (insufficient collateral, LTV limits, borrow caps) that turn straight into edge-case tests. To repurpose: a DEX (e.g. a Uniswap testnet deployment) or an L2 market (Aave on Base / Arbitrum Sepolia) — verify the testnet is live first.
-- [x] **Network — Sepolia.** Aave also runs Base / Arbitrum Sepolia markets if you'd rather show an L2; swap `NETWORK` + the definition in `utils/networks.ts`.
+- [x] **Network — Base Sepolia.** Not a preference: Aave has retired its Ethereum Sepolia market, and Base Sepolia is the only testnet market left. The test wallet therefore needs **Base Sepolia** ETH for gas.
 - [x] **Runner — Playwright.** Synpress also supports Cypress.
 - [ ] **Repo name + identity.** Repo is `crispy-guide`; rename if you like. Name + LinkedIn are in *Why this exists*.
 
