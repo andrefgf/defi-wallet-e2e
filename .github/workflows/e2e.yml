@@ -1,0 +1,87 @@
+name: E2E
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# Wallet flows drive real Sepolia state with a single shared test wallet —
+# never run two of these at once.
+concurrency:
+  group: e2e-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  e2e:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    env:
+      # Synpress runs headed by default; force headless and let xvfb provide a
+      # display (Chromium extensions still need an X server even headless=new).
+      HEADLESS: "true"
+      # Secrets come from GitHub repository secrets — never the repo.
+      SEED_PHRASE: ${{ secrets.SEED_PHRASE }}
+      WALLET_PASSWORD: ${{ secrets.WALLET_PASSWORD }}
+      SEPOLIA_RPC_URL: ${{ secrets.SEPOLIA_RPC_URL }}
+      NETWORK: sepolia
+      DAPP_URL: https://app.aave.com/?testnet=true
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      # Cache the Synpress-downloaded MetaMask build + the built wallet cache.
+      # Keyed on the wallet-setup files so a setup change rebuilds the cache.
+      # Caches the downloaded/extracted MetaMask build. The wallet profile itself
+      # is rebuilt each run (it's keyed to the seed, which lives in secrets).
+      - name: Cache MetaMask build
+        uses: actions/cache@v4
+        with:
+          path: .cache-synpress/metamask-chrome-*
+          key: metamask-${{ runner.os }}-${{ hashFiles('scripts/fetch-metamask.sh') }}
+          restore-keys: |
+            metamask-${{ runner.os }}-
+
+      - name: Cache Playwright browsers
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml') }}
+          restore-keys: |
+            playwright-${{ runner.os }}-
+
+      - name: Install Playwright Chromium + system deps
+        run: pnpm exec playwright install --with-deps chromium
+
+      - name: Type-check
+        run: pnpm run typecheck
+
+      # Uses our own builder (scripts/build-cache.ts), not `synpress wallet-setup`
+      # — see README → "Working around Synpress". It self-verifies that the
+      # wallet actually persisted, so a bad cache fails here rather than as 14
+      # confusing test failures.
+      - name: Build wallet cache (headless)
+        run: xvfb-run --auto-servernum pnpm run build:cache:headless
+
+      - name: Run E2E tests (headless)
+        run: xvfb-run --auto-servernum pnpm test
+
+      - name: Upload Playwright report
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report
+          path: playwright-report/
+          retention-days: 14

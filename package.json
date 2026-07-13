@@ -1,0 +1,51 @@
+{
+  "name": "crispy-guide",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Automated end-to-end tests for a DeFi dApp (Aave v3 on Sepolia) covering wallet connection, on-chain transactions, and failure modes, using Playwright + Synpress + MetaMask.",
+  "type": "module",
+  "scripts": {
+    "wallet:address": "tsx scripts/wallet-address.ts",
+    "fetch:metamask": "bash scripts/fetch-metamask.sh",
+    "build:cache": "pnpm run fetch:metamask && tsx scripts/build-cache.ts",
+    "build:cache:headless": "pnpm run fetch:metamask && cross-env HEADLESS=true tsx scripts/build-cache.ts",
+    "test": "cross-env HEADLESS=true playwright test",
+    "test:headed": "playwright test --headed",
+    "test:ui": "playwright test --ui",
+    "test:debug": "playwright test --debug",
+    "report": "playwright show-report",
+    "typecheck": "tsc --noEmit"
+  },
+  "keywords": [
+    "playwright",
+    "synpress",
+    "metamask",
+    "web3",
+    "e2e",
+    "defi",
+    "aave",
+    "qa"
+  ],
+  "author": "André Guerra",
+  "license": "MIT",
+  "devDependencies": {
+    "@playwright/test": "1.48.2",
+    "@synthetixio/synpress": "^4.1.2",
+    "@types/node": "^22.10.5",
+    "cross-env": "^7.0.3",
+    "dotenv": "^16.4.7",
+    "tsx": "^4.23.1",
+    "typescript": "^5.7.3",
+    "viem": "^2.55.1"
+  },
+  "pnpm": {
+    "overrides": {
+      "@playwright/test": "1.48.2",
+      "playwright": "1.48.2",
+      "playwright-core": "1.48.2"
+    },
+    "onlyBuiltDependencies": [
+      "esbuild"
+    ]
+  }
+}
