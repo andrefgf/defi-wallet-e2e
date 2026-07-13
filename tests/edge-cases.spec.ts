@@ -52,7 +52,7 @@ test.describe('Edge cases & failure modes', () => {
     await expect(modal.validationError(page)).toBeVisible()
     await expect(modal.primaryAction(page, /borrow/i)).toBeDisabled()
     expect(
-      await mm.hasPendingPopup(context, extensionId),
+      await mm.hasPendingRequest(context, extensionId),
       'a blocked borrow must never reach the wallet',
     ).toBe(false)
   })

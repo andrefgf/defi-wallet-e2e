@@ -197,7 +197,7 @@ The connection tests spend **no gas**, so CI is free to run on every push.
 
 | Suite | State |
 |---|---|
-| `connection.spec.ts` (3 tests) | ✅ **Passing** against live `app.aave.com` with a real MetaMask |
+| `connection.spec.ts` (3 tests) | ✅ **Passing** against live `app.aave.com` with a real MetaMask — **headed and headless** |
 | `supply-borrow` / `repay-withdraw` / `edge-cases` | ⚠️ Written and type-checked, **not yet verified** — they need a wallet funded with Sepolia ETH + Aave faucet tokens, and their Aave selectors (`utils/selectors.ts`) still need confirming against the live UI |
 
 The connection flow is the part that proves the hard bit works: a cached MetaMask, unlocked, driving a real dApp, approving and **rejecting** in the wallet popup. The remaining specs reuse exactly that machinery.
@@ -212,10 +212,22 @@ The connection flow is the part that proves the hard bit works: a cached MetaMas
 |---|---|---|
 | `synpress wallet-setup` CLI | Refuses to run on Windows; under WSL it hot-loops at ~96% CPU and never launches a browser | Replaced with [`scripts/build-cache.ts`](scripts/build-cache.ts), which builds the same profile directly |
 | `importWallet()` | Stops at MetaMask's "Your wallet is ready!" screen and never clicks **Open wallet**, so onboarding never completes and the wallet home never renders | [`wallet-setup/basic.setup.ts`](wallet-setup/basic.setup.ts) finishes onboarding itself |
+| `metaMaskFixtures()` | Its `unlockForFixture` never types the password in headless — every test dies with `Test timeout exceeded while setting up "page"`. **Passes headed, fails in CI.** | Replaced with our own fixture, [`fixtures/metamask.ts`](fixtures/metamask.ts) |
 | `connectToDapp()` | Clicks `[data-testid="page-container-footer-next"]` — gone. The button is now `confirm-btn` | [`utils/metamask-actions.ts`](utils/metamask-actions.ts) |
 | `switchNetwork()` / `addNetwork()` / `getAccountAddress()` | Depend on `network-display` / `address-copy-button-text`, which the redesign **removed entirely** — there is no longer a single "current network" element | Not used. The dApp requests the network switch itself and we approve it in the popup — which is the realistic user flow anyway |
-| MetaMask's `home.html` | Frequently paints **blank** on first load, so every locator silently sees an empty document | Reload-until-rendered loops in the builder and actions |
 | Cache built but tests saw "Create a new wallet" | The vault needs time to flush to disk; closing the browser too early yields a profile that *looks* built but has no wallet | The builder now **self-verifies** by reopening the profile and asserting the unlock screen appears |
+
+### MetaMask in headless is a different animal
+
+The suite passed headed and failed in CI. Three separate reasons, none of them obvious:
+
+1. **No popup window exists.** Under `--headless=new` MetaMask never creates its confirmation window, so waiting for one hangs forever. The pending request *is* still served at `notification.html`, so we open that page ourselves.
+2. **`load` never fires** on MetaMask's pages. A default `page.goto()` therefore blocks until it times out — and `page.reload()` has *no* timeout by default, so it hung indefinitely and silently ate the entire test budget. Everything now waits on `domcontentloaded` and is explicitly bounded.
+3. **MetaMask takes ~30 seconds to boot** its notification UI in headless, sitting as an empty shell first. The instinctive fix — retry/reload until it renders — is exactly wrong: each reload *restarts* that boot, so it never finishes. You have to wait it out.
+
+Also: never close-and-reopen the notification page to retry. Closing that window is how a user **rejects** a request, so retrying that way silently kills the very request you're waiting for.
+
+That last set is why a connect flow takes ~4 minutes in CI, and why `timeout` in [`playwright.config.ts`](playwright.config.ts) is generous. The bounded action/navigation timeouts are what catch a genuine hang.
 
 All wallet-popup interaction lives in **one file** — [`utils/metamask-actions.ts`](utils/metamask-actions.ts). If MetaMask's UI shifts again, that's the only thing to fix.
 

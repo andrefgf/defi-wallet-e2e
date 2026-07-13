@@ -15,7 +15,9 @@ concurrency:
 jobs:
   e2e:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    # Driving a real wallet against a live dApp is slow: ~2 min per test, plus
+    # the cache build. 30 min cancelled the run mid-flight.
+    timeout-minutes: 45
     env:
       # Chromium extensions need a display server even with --headless=new, so
       # the browser steps run under xvfb.

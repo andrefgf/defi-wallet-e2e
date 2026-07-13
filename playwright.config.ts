@@ -14,14 +14,19 @@ import 'dotenv/config'
  */
 export default defineConfig({
   testDir: './tests',
-  // Each wallet/on-chain flow is slow; give specs generous budgets.
-  timeout: 120_000,
+  // These specs drive a real MetaMask against a live dApp. MetaMask is
+  // punishingly slow in headless — its UI takes ~30s to boot for EACH
+  // interaction — so a full connect flow runs 4-5 minutes in CI. A tight
+  // timeout here fails tests that are working, just slowly. Budget generously:
+  // the bounded action/navigation timeouts below are what catch a genuine hang.
+  timeout: 360_000,
   expect: { timeout: 30_000 },
 
   fullyParallel: true,
   forbidOnly: !!process.env.CI,
-  // On-chain state makes flakiness common; retry in CI only.
-  retries: process.env.CI ? 2 : 0,
+  // Retry in CI only. Just one: these tests are slow (minutes each), and three
+  // attempts apiece overran the job's time limit and got the whole run cancelled.
+  retries: process.env.CI ? 1 : 0,
   // Synpress caches one wallet browser and supports parallel workers, but
   // shared on-chain state (a single test wallet) means serial is safer.
   workers: 1,
@@ -36,6 +41,10 @@ export default defineConfig({
     screenshot: 'only-on-failure',
     video: 'retain-on-failure',
     actionTimeout: 30_000,
+    // Bound navigation explicitly. Playwright's default is no limit, and a
+    // `goto`/`reload` on a MetaMask page with nothing to render never fires
+    // `load` — which silently ate the whole test budget.
+    navigationTimeout: 30_000,
   },
 
   projects: [
