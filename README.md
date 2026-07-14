@@ -4,9 +4,10 @@
 >
 > **Target:** Aave v3 on **Base Sepolia** (Aave's only remaining testnet market).
 
-<!-- Add once the workflow has run on main:
-![E2E](https://github.com/andrefgf/crispy-guide/actions/workflows/e2e.yml/badge.svg)
--->
+[![E2E](https://github.com/andrefgf/crispy-guide/actions/workflows/e2e.yml/badge.svg)](https://github.com/andrefgf/crispy-guide/actions/workflows/e2e.yml)
+![Playwright](https://img.shields.io/badge/Playwright-2EAD33?logo=playwright&logoColor=white)
+![TypeScript](https://img.shields.io/badge/TypeScript-3178C6?logo=typescript&logoColor=white)
+![MetaMask](https://img.shields.io/badge/MetaMask-F6851B?logo=metamask&logoColor=white)
 
 ---
 
