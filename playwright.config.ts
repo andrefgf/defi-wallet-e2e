@@ -41,14 +41,25 @@ export default defineConfig({
     // Aave's only live testnet market is Base Sepolia; testnet mode itself is a
     // localStorage flag set by the fixture (see fixtures/metamask.ts).
     baseURL: process.env.DAPP_URL ?? 'https://app.aave.com/?marketName=proto_base_sepolia_v3',
-    trace: 'retain-on-failure',
-    screenshot: 'only-on-failure',
-    video: 'retain-on-failure',
+
+    // Always on, not just on failure. These specs ARE the deliverable: a record
+    // of a real wallet driving a real DeFi protocol. The trace carries a DOM
+    // snapshot for every action, so `pnpm run report` lets you scrub the whole
+    // user journey — connect, sign, supply, borrow — step by step.
+    trace: 'on',
+    screenshot: 'on',
+
+    // `video` is deliberately NOT set here: it has no effect on the persistent
+    // context our fixture builds (see fixtures/metamask.ts). Video is opt-in via
+    // `pnpm run test:demo` — it films every MetaMask popup too and more than
+    // doubles the runtime, which is a bad trade on every CI run.
+
     actionTimeout: 30_000,
-    // Bound navigation explicitly. Playwright's default is no limit, and a
+    // Bound navigation explicitly — Playwright's default is NO limit, and a
     // `goto`/`reload` on a MetaMask page with nothing to render never fires
-    // `load` — which silently ate the whole test budget.
-    navigationTimeout: 30_000,
+    // `load`, which silently ate the whole test budget. 60s rather than 30s:
+    // Aave is a heavy SPA on a testnet RPC and genuinely takes its time.
+    navigationTimeout: 60_000,
   },
 
   projects: [

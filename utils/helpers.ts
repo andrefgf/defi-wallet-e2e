@@ -1,4 +1,4 @@
-import { expect, type BrowserContext, type Page } from '@playwright/test'
+import { expect, test, type BrowserContext, type Page } from '@playwright/test'
 import { connect, dashboard, modal, nav } from './selectors'
 import * as mm from './metamask-actions'
 import { BASE_SEPOLIA, addChainParams } from './networks'
@@ -7,6 +7,21 @@ import { BASE_SEPOLIA, addChainParams } from './networks'
  * Behaviour-level helpers. Specs read as user intent; the DOM lives in
  * `selectors.ts` and the wallet popups in `metamask-actions.ts`.
  */
+
+/**
+ * Attach a named screenshot to the HTML report.
+ *
+ * Playwright's trace already snapshots every action, but that's a firehose of
+ * DOM diffs. These are the handful of moments a human actually wants to see —
+ * "wallet connected", "supply confirmed" — so the report reads as the user's
+ * journey rather than a log. Run `pnpm run report` to page through them.
+ */
+export async function capture(page: Page, name: string): Promise<void> {
+  await test
+    .info()
+    .attach(name, { body: await page.screenshot(), contentType: 'image/png' })
+    .catch(() => {}) // a screenshot must never fail the test it documents
+}
 
 // --- Network ----------------------------------------------------------------
 
@@ -113,11 +128,17 @@ export async function connectWallet(
   context: BrowserContext,
   extensionId: string,
 ): Promise<void> {
-  await connectWalletWithoutNetworkSwitch(page, context, extensionId)
+  await test.step('Connect MetaMask to Aave', async () => {
+    await connectWalletWithoutNetworkSwitch(page, context, extensionId)
+  })
 
-  // Approving the connection is not the end of the handshake: Aave immediately
-  // asks the wallet to add Base Sepolia and switch to it.
-  await ensureNetwork(page, context, extensionId)
+  await test.step(`Switch the wallet to ${BASE_SEPOLIA.chainName}`, async () => {
+    // Approving the connection is not the end of the handshake: Aave immediately
+    // asks the wallet to add Base Sepolia and switch to it.
+    await ensureNetwork(page, context, extensionId)
+  })
+
+  await capture(page, '1. Wallet connected on Base Sepolia')
 }
 
 /** Assert the dApp shows a connected account. */
@@ -213,11 +234,16 @@ export async function supply(
   asset: string,
   amount: string,
 ): Promise<void> {
-  await nav.dashboard(page).click()
-  await dashboard.supplyButton(page, asset).click()
-  await modal.amountInput(page).fill(amount)
-  await submitModalAction(page, context, extensionId)
-  await closeModal(page)
+  await test.step(`Supply ${amount} ${asset} as collateral`, async () => {
+    await nav.dashboard(page).click()
+    await dashboard.supplyButton(page, asset).click()
+    await modal.amountInput(page).fill(amount)
+    await capture(page, `2. Supply ${amount} ${asset} — before signing`)
+
+    await submitModalAction(page, context, extensionId)
+    await capture(page, `3. Supply ${asset} — confirmed on-chain`)
+    await closeModal(page)
+  })
 }
 
 /** Borrow an asset against existing collateral. */
@@ -228,11 +254,16 @@ export async function borrow(
   asset: string,
   amount: string,
 ): Promise<void> {
-  await nav.dashboard(page).click()
-  await dashboard.borrowButton(page, asset).click()
-  await modal.amountInput(page).fill(amount)
-  await submitModalAction(page, context, extensionId)
-  await closeModal(page)
+  await test.step(`Borrow ${amount} ${asset}`, async () => {
+    await nav.dashboard(page).click()
+    await dashboard.borrowButton(page, asset).click()
+    await modal.amountInput(page).fill(amount)
+    await capture(page, `4. Borrow ${amount} ${asset} — before signing`)
+
+    await submitModalAction(page, context, extensionId)
+    await capture(page, `5. Borrow ${asset} — confirmed on-chain`)
+    await closeModal(page)
+  })
 }
 
 /** Repay borrowed debt. */
@@ -242,11 +273,16 @@ export async function repay(
   extensionId: string,
   asset: string,
 ): Promise<void> {
-  await nav.dashboard(page).click()
-  await dashboard.repayButton(page, asset).click()
-  await modal.maxButton(page).click()
-  await submitModalAction(page, context, extensionId)
-  await closeModal(page)
+  await test.step(`Repay the ${asset} debt`, async () => {
+    await nav.dashboard(page).click()
+    await dashboard.repayButton(page, asset).click()
+    await modal.maxButton(page).click()
+    await capture(page, `6. Repay ${asset} — before signing`)
+
+    await submitModalAction(page, context, extensionId)
+    await capture(page, `7. Repay ${asset} — confirmed on-chain`)
+    await closeModal(page)
+  })
 }
 
 /**
@@ -264,11 +300,16 @@ export async function withdraw(
   asset: string,
   amount: string,
 ): Promise<void> {
-  await nav.dashboard(page).click()
-  await dashboard.withdrawButton(page, asset).click()
-  await modal.amountInput(page).fill(amount)
-  await submitModalAction(page, context, extensionId)
-  await closeModal(page)
+  await test.step(`Withdraw ${amount} ${asset}`, async () => {
+    await nav.dashboard(page).click()
+    await dashboard.withdrawButton(page, asset).click()
+    await modal.amountInput(page).fill(amount)
+    await capture(page, `8. Withdraw ${amount} ${asset} — before signing`)
+
+    await submitModalAction(page, context, extensionId)
+    await capture(page, `9. Withdraw ${asset} — confirmed on-chain`)
+    await closeModal(page)
+  })
 }
 
 /**

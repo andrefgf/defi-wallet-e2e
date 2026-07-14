@@ -15,9 +15,10 @@ concurrency:
 jobs:
   e2e:
     runs-on: ubuntu-latest
-    # Driving a real wallet against a live dApp is slow: ~2 min per test, plus
-    # the cache build. 30 min cancelled the run mid-flight.
-    timeout-minutes: 45
+    # The full suite drives a real wallet against a live protocol: MetaMask's
+    # popup needs ~30s to boot for EACH interaction, and a single supply is two
+    # on-chain transactions. ~40 min is the honest cost of not mocking.
+    timeout-minutes: 90
     env:
       # Chromium extensions need a display server even with --headless=new, so
       # the browser steps run under xvfb.
@@ -96,13 +97,17 @@ jobs:
       - name: Build wallet cache (headless)
         run: xvfb-run --auto-servernum pnpm run build:cache:headless
 
-      # Runs the VERIFIED specs only (connection.spec.ts). The supply/borrow/
-      # repay/withdraw and edge-case specs need a wallet funded with Sepolia ETH
-      # + Aave faucet tokens and still have unverified selectors — running them
-      # here would make the badge red for reasons unrelated to the code under
-      # test. Move them into `test:ci` as each one is confirmed green.
+      # The lending suite spends real (testnet) gas and needs test tokens. Fail
+      # here with an actionable message rather than 20 minutes later, deep inside
+      # a wallet flow, with something cryptic.
+      - name: Preflight — wallet is funded
+        run: pnpm run preflight
+
+      # The FULL suite: connection, the lending lifecycle, and the edge cases.
+      # Every transaction is really signed in MetaMask and really settles
+      # on-chain.
       - name: Run E2E tests (headless)
-        run: xvfb-run --auto-servernum pnpm run test:ci
+        run: xvfb-run --auto-servernum pnpm test
 
       - name: Upload Playwright report
         if: ${{ !cancelled() }}

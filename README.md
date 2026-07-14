@@ -125,11 +125,31 @@ pnpm run build:cache          # import the wallet once; cached and reused
 
 ### Tests
 ```bash
-pnpm test                     # everything, headless
-pnpm run test:ci              # the fast suite CI runs (connection)
-pnpm run test:headed          # watch it drive MetaMask
-pnpm run report               # last HTML report
+pnpm test                     # everything, headless (what CI runs)
+pnpm run test:smoke           # connection only — the quick check
+pnpm run test:headed          # watch it drive MetaMask for real
+pnpm run test:demo            # everything + video recording (slow; see below)
+pnpm run report               # ← open the report
 ```
+
+### Watching the user journey
+
+Traces and screenshots are captured on **every** run, not just failures — these specs *are* the deliverable. `pnpm run report` opens an HTML report where each test gives you:
+
+- **A trace** — Playwright's time-travel debugger. Scrub the whole journey with a full DOM snapshot before and after every action, plus the network calls behind each one. This is the best way to watch the flow.
+- **Named milestone screenshots**, so it reads as a story rather than a log:
+  ```
+  1. Wallet connected on Base Sepolia
+  2. Supply 100 USDC — before signing
+  3. Supply USDC — confirmed on-chain
+  4. Borrow 10 USDT — before signing
+  …
+  ```
+- **Named steps** (`test.step`) — "Connect MetaMask to Aave", "Switch the wallet to Base Sepolia", "Supply 100 USDC as collateral" — so the report is legible to someone who has never seen the code.
+
+CI uploads the same report as the **`playwright-report`** artifact on every run.
+
+**Video is opt-in** (`pnpm run test:demo`). Playwright films *every* page in the context — which here means every MetaMask popup, 30+ clips per run — and it pushed a 3.8-minute test to 9 minutes. The trace already gives you a scrubable filmstrip, so paying that on every CI run buys almost nothing. Turn it on when you want footage to hand someone.
 
 > Test tokens are a **precondition**, not the thing under test — Aave's faucet enforces a mint timelock, so driving it every run would guarantee flakes. `mint:tokens` handles it out-of-band.
 
@@ -183,11 +203,13 @@ WSL2 ships **WSLg**, so `test:headed` opens a real browser window.
 
 ## CI
 
-GitHub Actions runs headless under `xvfb` on push / PR, caching the MetaMask build and Playwright browsers.
+GitHub Actions runs the **entire suite** headless under `xvfb` on push / PR — all 10 tests, including every on-chain transaction. It caches the MetaMask build and the Playwright browsers, and takes ~40 minutes: MetaMask's popup needs ~30s to boot for *each* interaction, and a single supply is two transactions.
 
 **Required secrets** (a throwaway wallet only): `SEED_PHRASE`, `WALLET_PASSWORD`.
 
-CI runs **`test:ci`** — the connection suite, which spends **no gas** and so can run free on every push. The lending lifecycle is deliberately *not* in CI: it costs real (testnet) gas, takes ~20 minutes, and mutates on-chain state, which makes it a poor fit for a per-push gate. Run it locally or on a schedule.
+A **preflight** step (`pnpm run preflight`) checks the wallet still has gas and test tokens *before* the browsers start — so a depleted wallet fails in ten seconds with an actionable message instead of twenty minutes later from inside a wallet popup. The suite nets about **-75 USDC per run**; `pnpm run mint:tokens` tops it up.
+
+Every run uploads a **`playwright-report` artifact** containing the videos, traces and screenshots (below).
 
 ## Security notes
 - Use a **brand-new wallet created only for testing.** It must never hold mainnet assets.

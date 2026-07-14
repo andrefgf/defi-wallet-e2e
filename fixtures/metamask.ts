@@ -38,7 +38,7 @@ type MetaMaskFixtures = {
 }
 
 export const test = base.extend<MetaMaskFixtures>({
-  context: async ({}, use) => {
+  context: async ({}, use, testInfo) => {
     const cachePath = walletProfilePath(walletSetup.hash)
 
     if (!fs.existsSync(cachePath)) {
@@ -51,9 +51,26 @@ export const test = base.extend<MetaMaskFixtures>({
     const profile = fs.mkdtempSync(path.join(os.tmpdir(), 'metamask-profile-'))
     fs.cpSync(cachePath, profile, { recursive: true })
 
+    // Video is OPT-IN (`RECORD_VIDEO=1`, or `pnpm run test:demo`).
+    //
+    // Note it must be configured HERE, not via `video:` in playwright.config.ts —
+    // that option only applies to contexts Playwright creates itself, and we build
+    // our own, so it silently records nothing.
+    //
+    // Why opt-in: Playwright films EVERY page in the context, which here means
+    // every MetaMask popup as well as the dApp — 30+ clips per run, and it pushed
+    // a 3.8-minute test to 9 minutes. The trace already carries a scrubable
+    // per-action filmstrip, so paying that on every CI run buys almost nothing.
+    // Turn it on when you want footage to show someone.
+    const recordVideo = process.env.RECORD_VIDEO
+      ? { dir: testInfo.outputDir, size: { width: 1280, height: 720 } }
+      : undefined
+
     const context = await chromium.launchPersistentContext(profile, {
       headless: false, // headlessness is driven by --headless=new in browserArgs()
       args: browserArgs(),
+      viewport: { width: 1280, height: 720 },
+      recordVideo,
     })
 
     // Aave only reveals its testnet markets (and the Faucet) when testnet mode
@@ -76,7 +93,25 @@ export const test = base.extend<MetaMaskFixtures>({
 
     await use(context)
 
+    // Closing the context is what finalises the .webm files.
     await context.close()
+
+    // Attach any footage to the report. Playwright auto-attaches video only for
+    // contexts it owns; ours it doesn't, so we do it ourselves.
+    if (recordVideo) {
+      try {
+        const videos = fs.readdirSync(testInfo.outputDir).filter((f) => f.endsWith('.webm'))
+        for (const [index, file] of videos.entries()) {
+          await testInfo.attach(`video ${index + 1} — browser recording`, {
+            path: path.join(testInfo.outputDir, file),
+            contentType: 'video/webm',
+          })
+        }
+      } catch {
+        // never fail a passing test over its own documentation
+      }
+    }
+
     fs.rmSync(profile, { recursive: true, force: true })
   },
 

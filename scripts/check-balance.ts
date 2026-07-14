@@ -1,38 +1,53 @@
-import { createPublicClient, http, formatEther } from 'viem'
-import { baseSepolia, sepolia } from 'viem/chains'
-import { mnemonicToAccount } from 'viem/accounts'
 import 'dotenv/config'
+import { nativeBalance, tokenBalance, testWalletAddress } from '../utils/onchain'
+import { BASE_SEPOLIA } from '../utils/networks'
 
 /**
- * Prints the test wallet's native balance on both testnets.
+ * Report the test wallet's balances — and, with `--check`, fail if the suite
+ * couldn't actually run.
  *
- * Aave's only live testnet market is BASE Sepolia, so that is the balance that
- * actually matters for the supply/borrow specs — Ethereum Sepolia ETH cannot
- * pay for gas there.
+ * CI uses `--check` as a preflight: a wallet out of gas or out of test tokens
+ * should say so in ten seconds, not twenty minutes later from somewhere deep
+ * inside a wallet popup.
  */
-const seedPhrase = process.env.SEED_PHRASE
-if (!seedPhrase) {
-  console.error('SEED_PHRASE is not set. Copy .env.example to .env first.')
+
+// Enough for a full lending run (supply, borrow, repay, withdraw). The suite
+// nets about -75 USDC per run, so this leaves plenty of headroom.
+const MIN_GAS = 0.0005
+const MIN_USDC = 200
+
+const enforce = process.argv.includes('--check')
+
+const gas = await nativeBalance()
+const usdc = await tokenBalance('USDC')
+
+console.log(`\nwallet : ${testWalletAddress()}`)
+console.log(`chain  : ${BASE_SEPOLIA.chainName}\n`)
+console.log(`  gas (ETH) : ${gas}`)
+console.log(`  USDC      : ${usdc}\n`)
+
+if (!enforce) {
+  console.log('Top up: https://www.alchemy.com/faucets/base-sepolia  ·  pnpm run mint:tokens\n')
+  process.exit(0)
+}
+
+const problems: string[] = []
+if (gas < MIN_GAS) {
+  problems.push(
+    `Out of gas: ${gas} ETH on ${BASE_SEPOLIA.chainName} (need >= ${MIN_GAS}). ` +
+      'Top up at https://www.alchemy.com/faucets/base-sepolia',
+  )
+}
+if (usdc < MIN_USDC) {
+  problems.push(
+    `Not enough test USDC: ${usdc} (need >= ${MIN_USDC}). Run: pnpm run mint:tokens ` +
+      "(Aave's faucet enforces a mint timelock, so this may need a retry later).",
+  )
+}
+
+if (problems.length > 0) {
+  for (const problem of problems) console.error(`::error::${problem}`)
   process.exit(1)
 }
 
-const account = mnemonicToAccount(seedPhrase.trim())
-console.log(`\nwallet: ${account.address}\n`)
-
-const chains = [
-  { chain: baseSepolia, rpc: process.env.BASE_SEPOLIA_RPC_URL ?? 'https://sepolia.base.org', needed: true },
-  { chain: sepolia, rpc: 'https://ethereum-sepolia-rpc.publicnode.com', needed: false },
-]
-
-for (const { chain, rpc, needed } of chains) {
-  const client = createPublicClient({ chain, transport: http(rpc) })
-  try {
-    const balance = await client.getBalance({ address: account.address })
-    const eth = formatEther(balance)
-    const tag = needed ? '  <-- the one Aave needs' : ''
-    console.log(`${chain.name.padEnd(18)} ${eth.padStart(12)} ETH${tag}`)
-  } catch (error) {
-    console.log(`${chain.name.padEnd(18)} (query failed: ${(error as Error).message.split('\n')[0]})`)
-  }
-}
-console.log()
+console.log('Wallet is funded — the suite can run.\n')
