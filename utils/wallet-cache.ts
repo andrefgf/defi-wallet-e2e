@@ -8,7 +8,7 @@ import type { Page } from '@playwright/test'
  * so the two can never drift apart.
  */
 
-export const METAMASK_VERSION = process.env.METAMASK_VERSION ?? '13.13.1'
+export const METAMASK_VERSION = process.env.METAMASK_VERSION ?? '13.39.1'
 export const CACHE_DIR = path.join(process.cwd(), '.cache-synpress')
 
 /** Path to the unpacked MetaMask extension. */

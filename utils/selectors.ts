@@ -1,154 +1,171 @@
 import type { Page, Locator } from '@playwright/test'
 
 /**
- * Single source of truth for dApp selectors.
+ * Single source of truth for dApp selectors (Aave v3, Base Sepolia market).
  *
- * Strategy (in priority order):
- *   1. Role + accessible name  — `getByRole('button', { name: /supply/i })`
- *   2. Visible text            — `getByText(...)`
- *   3. Aave `data-cy` hooks    — the Aave interface (github.com/aave/interface)
- *      ships stable `data-cy` attributes for many controls. We prefer these
- *      over CSS where a role/text selector would be ambiguous.
+ * These are the hooks Aave actually ships — captured off the live app, not
+ * guessed. Two things worth knowing:
  *
- * ⚠️ These target a live, third-party UI (app.aave.com testnet mode). Aave ships
- * UI changes regularly. If a spec fails on a "not found" locator, fix it HERE —
- * never scatter selectors back into the specs. Run `pnpm run test:headed` and
- * inspect with the Playwright Inspector / `page.pause()` to confirm hooks.
+ *  - Aave's modal is a MUI `role="presentation"`, NOT `role="dialog"`. Every
+ *    `getByRole('dialog')` locator silently matches nothing.
+ *  - Its `data-cy` attributes (`Modal`, `actionButton`, `faucetListItem_USDC`,
+ *    `dashboardSupplyListItem_USDC`, …) are stable and far better than text,
+ *    which changes with the asset and the flow's step.
+ *
+ * If a spec fails on a "not found" locator, fix it HERE — never scatter
+ * selectors back into the specs.
  */
 
 // --- Wallet connection ------------------------------------------------------
 
 export const connect = {
-  /** Top-right "Connect wallet" entry point. */
   connectWalletButton: (page: Page): Locator =>
     page.getByRole('button', { name: /connect wallet/i }).first(),
 
-  /** MetaMask option in the wallet-picker modal (verified against app.aave.com). */
-  metaMaskOption: (page: Page): Locator =>
-    page.getByRole('button', { name: /^metamask$/i }),
+  /** MetaMask entry in the wallet picker. */
+  metaMaskOption: (page: Page): Locator => page.getByRole('button', { name: /^metamask$/i }),
+
+  /** Aave's first-load analytics consent; it can sit over the connect flow. */
+  analyticsOptOut: (page: Page): Locator => page.getByRole('button', { name: /opt-out/i }),
 
   /**
-   * Aave shows an analytics consent prompt on first load. It can sit above the
-   * connect flow, so dismiss it before interacting with the page.
-   */
-  analyticsOptOut: (page: Page): Locator =>
-    page.getByRole('button', { name: /opt-out/i }),
-
-  /**
-   * The header control that, once connected, shows the truncated address
-   * (e.g. "0x1234…abcd"). Its presence is what proves the dApp sees a wallet.
-   * Doubles as the opener for the account menu, where "Disconnect" lives.
+   * Header control showing the truncated address once connected (e.g.
+   * "0xb1…c171"). Its presence is what proves the dApp sees a wallet; it also
+   * opens the account menu, where "Disconnect" lives.
    */
   accountChip: (page: Page): Locator =>
     page.getByRole('button', { name: /0x[0-9a-f]{2,4}/i }).first(),
 
-  /** Opens the account menu (disconnect lives inside). */
   openAccountMenu: (page: Page): Locator => connect.accountChip(page),
 
-  disconnectButton: (page: Page): Locator =>
-    page.getByRole('button', { name: /disconnect/i }),
+  disconnectButton: (page: Page): Locator => page.getByRole('button', { name: /disconnect/i }),
 }
 
-// --- Network banner / switching --------------------------------------------
+// --- Navigation -------------------------------------------------------------
 
-export const network = {
-  /** Banner the dApp shows when the wallet is on an unsupported network. */
-  wrongNetworkBanner: (page: Page): Locator =>
-    page.getByText(/wrong network|unsupported|switch.*network|please switch/i).first(),
-
-  /** In-app "switch network" CTA (triggers a MetaMask switch prompt). */
-  switchNetworkButton: (page: Page): Locator =>
-    page.getByRole('button', { name: /switch.*network|change network/i }),
+export const nav = {
+  dashboard: (page: Page): Locator => page.getByRole('link', { name: /dashboard/i }).first(),
+  markets: (page: Page): Locator => page.getByRole('link', { name: /markets/i }).first(),
+  faucet: (page: Page): Locator => page.getByRole('link', { name: /faucet/i }).first(),
 }
 
-// --- Markets / dashboard ----------------------------------------------------
+// --- Faucet (testnet only) --------------------------------------------------
 
-export const markets = {
-  /** "Supply <ASSET>" button on the dashboard / asset row. */
-  supplyButton: (page: Page, asset: string): Locator =>
-    page.getByRole('button', { name: new RegExp(`supply\\s+${asset}`, 'i') }).first(),
+export const faucet = {
+  /** Row for an asset, e.g. `faucetListItem_USDC`. */
+  row: (page: Page, asset: string): Locator =>
+    page.locator(`[data-cy="faucetListItem_${asset.toUpperCase()}"]`),
 
-  /** Generic "Supply" button (e.g. inside the asset's action panel). */
-  supplyButtonGeneric: (page: Page): Locator =>
-    page.getByRole('button', { name: /^supply$/i }),
-
-  borrowButton: (page: Page, asset: string): Locator =>
-    page.getByRole('button', { name: new RegExp(`borrow\\s+${asset}`, 'i') }).first(),
-
-  borrowButtonGeneric: (page: Page): Locator =>
-    page.getByRole('button', { name: /^borrow$/i }),
-
-  repayButton: (page: Page): Locator =>
-    page.getByRole('button', { name: /^repay$/i }),
-
-  withdrawButton: (page: Page): Locator =>
-    page.getByRole('button', { name: /^withdraw$/i }),
-
-  /** Faucet entry (testnet mode only). */
-  faucetNavLink: (page: Page): Locator =>
-    page.getByRole('link', { name: /faucet/i }),
-
-  faucetMintButton: (page: Page, asset: string): Locator =>
-    page.getByRole('button', { name: new RegExp(`faucet\\s+${asset}|mint`, 'i') }).first(),
+  /** The "Faucet" button inside that asset's row. */
+  mintButton: (page: Page, asset: string): Locator =>
+    faucet.row(page, asset).getByRole('button').first(),
 }
 
-// --- Action modal (shared by supply/borrow/repay/withdraw) ------------------
+// --- Modal (shared by faucet / supply / borrow / repay / withdraw) -----------
 
 export const modal = {
-  root: (page: Page): Locator => page.getByRole('dialog'),
-
-  amountInput: (page: Page): Locator =>
-    page.getByRole('dialog').locator('input[type="number"], input[inputmode="decimal"]').first(),
-
-  /** "Max" shortcut next to the amount input. */
-  maxButton: (page: Page): Locator =>
-    page.getByRole('dialog').getByRole('button', { name: /^max$/i }),
+  /** Aave's modal. NOT role=dialog — it's a MUI presentation container. */
+  root: (page: Page): Locator => page.locator('[data-cy="Modal"]').last(),
 
   /**
-   * Primary action button inside the modal. Aave relabels this through the
-   * flow ("Approve", "Supply DAI", "Borrow", etc.), so match broadly and let
-   * the caller pass the expected verb.
+   * BOTH steps of an ERC-20 flow, in DOM order.
+   *
+   * Aave renders them as two separate buttons with two DIFFERENT hooks, stacked
+   * in the same modal, with only one enabled at a time:
+   *
+   *   [data-cy="approvalButton"]  "Approve USDC to continue"   (step 1)
+   *   [data-cy="actionButton"]    "Supply USDC"                (step 2)
+   *
+   * Matching only `actionButton` silently misses the live Approve button and the
+   * flow stalls forever on a modal that looks perfectly fine.
    */
-  primaryAction: (page: Page, verb: RegExp): Locator =>
-    page.getByRole('dialog').getByRole('button', { name: verb }).last(),
+  actionButtons: (page: Page): Locator =>
+    modal.root(page).locator('[data-cy="approvalButton"], [data-cy="actionButton"]'),
 
-  /** Approve step that precedes some supply/repay actions (ERC-20 allowance). */
-  approveButton: (page: Page): Locator =>
-    page.getByRole('dialog').getByRole('button', { name: /^approve/i }),
+  /** The ERC-20 allowance step. */
+  approvalButton: (page: Page): Locator =>
+    modal.root(page).locator('[data-cy="approvalButton"]'),
 
-  /** Success state shown after the tx mines. */
-  successMessage: (page: Page): Locator =>
-    page.getByRole('dialog').getByText(/all done|success|confirmed/i).first(),
+  /**
+   * The FINAL action ("Supply USDC", not the Approve step). Aave relabels it
+   * through the flow — and tellingly renders "Wrong Network" here when the
+   * chain is wrong — so match the hook, not the text.
+   */
+  actionButton: (page: Page): Locator => modal.root(page).locator('[data-cy="actionButton"]'),
 
-  /** Inline validation error (insufficient balance, cap reached, …). */
+  /**
+   * The amount field.
+   *
+   * It carries no hook of its own, and `data-cy="inputAsset"` is a red herring —
+   * that's the <h3> showing the asset's NAME ("USDC"), not the input. The amount
+   * box is simply the only <input> in the modal.
+   */
+  amountInput: (page: Page): Locator => modal.root(page).locator('input').first(),
+
+  /** "MAX" — fills the full available balance / debt. */
+  maxButton: (page: Page): Locator => modal.root(page).getByRole('button', { name: /^max$/i }),
+
+  closeButton: (page: Page): Locator => modal.root(page).locator('[data-cy="close-button"]'),
+
+  /** Terminal success state ("All done!"). */
+  success: (page: Page): Locator => modal.root(page).getByText(/all done/i),
+
+  /** Terminal failure state. */
+  failure: (page: Page): Locator => modal.root(page).getByText(/transaction failed/i),
+
+  /** Inline validation (insufficient balance, cap reached, …). */
   validationError: (page: Page): Locator =>
-    page.getByRole('dialog').getByText(
-      /not enough|insufficient|exceeds|cannot|too low|reached|disabled|no funds/i,
-    ).first(),
-
-  closeButton: (page: Page): Locator =>
-    page.getByRole('dialog').getByRole('button', { name: /close|done|ok/i }).last(),
+    modal
+      .root(page)
+      .getByText(/not enough|insufficient|exceeds|cannot|too low|reached|no funds|wrong network/i)
+      .first(),
 }
 
-// --- Dashboard read-outs (assertions) --------------------------------------
+// --- Dashboard --------------------------------------------------------------
 
 export const dashboard = {
-  /** Health-factor value shown on the dashboard once a position exists. */
-  healthFactor: (page: Page): Locator =>
-    page.locator('[data-cy="HealthFactorTopPanel"], [data-cy*="HealthFactor"]').first(),
+  /** Suppliable asset row, e.g. `dashboardSupplyListItem_USDC`. */
+  supplyRow: (page: Page, asset: string): Locator =>
+    page.locator(`[data-cy="dashboardSupplyListItem_${asset.toUpperCase()}"]`),
 
-  /** "Your supplies" section. */
-  yourSupplies: (page: Page): Locator =>
-    page.getByText(/your supplies/i).first(),
+  /** Borrowable asset row, e.g. `dashboardBorrowListItem_USDC`. */
+  borrowRow: (page: Page, asset: string): Locator =>
+    page.locator(`[data-cy="dashboardBorrowListItem_${asset.toUpperCase()}"]`),
 
-  /** "Your borrows" section. */
-  yourBorrows: (page: Page): Locator =>
-    page.getByText(/your borrows/i).first(),
+  supplyButton: (page: Page, asset: string): Locator =>
+    dashboard.supplyRow(page, asset).getByRole('button', { name: /supply/i }).first(),
 
-  /** A supplied-asset row by symbol (proves an aToken position exists). */
+  borrowButton: (page: Page, asset: string): Locator =>
+    dashboard.borrowRow(page, asset).getByRole('button', { name: /borrow/i }).first(),
+
+  /**
+   * Rows in "Your supplies" / "Your borrows", once a position exists.
+   *
+   * Prefix match on purpose: Aave appends a state suffix to these hooks — a
+   * supplied position reads `dashboardSuppliedListItem_USDC_Collateral` when
+   * it's being used as collateral. An exact match silently finds nothing.
+   */
   suppliedRow: (page: Page, asset: string): Locator =>
-    page.locator('[data-cy*="dashboardSuppliedListItem"]').filter({ hasText: new RegExp(asset, 'i') }).first(),
+    page.locator(`[data-cy^="dashboardSuppliedListItem_${asset.toUpperCase()}"]`),
 
   borrowedRow: (page: Page, asset: string): Locator =>
-    page.locator('[data-cy*="dashboardBorrowedListItem"]').filter({ hasText: new RegExp(asset, 'i') }).first(),
+    page.locator(`[data-cy^="dashboardBorrowedListItem_${asset.toUpperCase()}"]`),
+
+  withdrawButton: (page: Page, asset: string): Locator =>
+    dashboard.suppliedRow(page, asset).getByRole('button', { name: /withdraw/i }).first(),
+
+  repayButton: (page: Page, asset: string): Locator =>
+    dashboard.borrowedRow(page, asset).getByRole('button', { name: /repay/i }).first(),
+
+  /** Health factor, shown once collateral is supplied. */
+  healthFactor: (page: Page): Locator =>
+    page.locator('[data-cy="HealthFactorTopPanel"], [data-cy*="HealthFactor"]').first(),
+}
+
+// --- Network state ----------------------------------------------------------
+
+export const network = {
+  /** Aave's wrong-network warning; it also disables the modal's action button. */
+  wrongNetworkBanner: (page: Page): Locator =>
+    page.getByText(/wrong network|couldn't switch the network|please switch/i).first(),
 }

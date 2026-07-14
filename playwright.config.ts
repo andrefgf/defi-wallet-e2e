@@ -14,12 +14,14 @@ import 'dotenv/config'
  */
 export default defineConfig({
   testDir: './tests',
-  // These specs drive a real MetaMask against a live dApp. MetaMask is
-  // punishingly slow in headless — its UI takes ~30s to boot for EACH
-  // interaction — so a full connect flow runs 4-5 minutes in CI. A tight
-  // timeout here fails tests that are working, just slowly. Budget generously:
-  // the bounded action/navigation timeouts below are what catch a genuine hang.
-  timeout: 360_000,
+  // These specs drive a real MetaMask against a live dApp, and MetaMask is
+  // punishingly slow headless — its popup takes ~30s to boot for EACH
+  // interaction. A full lending flow is five of them (connect, add network,
+  // switch, ERC-20 approve, then the action itself), so ten minutes is not
+  // padding, it's the real cost. A tight timeout here just fails tests that are
+  // working, only slowly. The bounded action/navigation timeouts below are what
+  // catch a genuine hang.
+  timeout: 600_000,
   expect: { timeout: 30_000 },
 
   fullyParallel: true,

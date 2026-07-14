@@ -1,269 +1,203 @@
 # Web3 dApp E2E Wallet Testing Suite
 
-> Automated end-to-end tests for a real DeFi dApp — covering wallet connection, on-chain transactions, and failure modes — using **Playwright + Synpress + MetaMask**, written in **TypeScript**.
+> End-to-end tests that drive a **real MetaMask** against a **live DeFi protocol** — wallet connection, the full lending lifecycle, and the failure modes that matter — in **TypeScript + Playwright**, running **headless in CI**.
 >
-> **Target:** Aave v3 on the **Base Sepolia** testnet — Aave's only remaining testnet market (Ethereum Sepolia has been retired from the app).
+> **Target:** Aave v3 on **Base Sepolia** (Aave's only remaining testnet market).
 
-<!-- Wire these up once CI is green -->
-<!-- ![E2E](https://img.shields.io/badge/e2e-passing-brightgreen) ![Playwright](https://img.shields.io/badge/Playwright-✓-blue) ![TypeScript](https://img.shields.io/badge/TypeScript-✓-blue) -->
+<!-- Add once the workflow has run on main:
+![E2E](https://github.com/andrefgf/crispy-guide/actions/workflows/e2e.yml/badge.svg)
+-->
 
 ---
 
 ## Why this exists
 
-This is a public QA portfolio artifact. In web3, wallet-driven flows are the hardest and least-automated part of dApp testing — MetaMask popups, network switching, transaction signing, and on-chain state are exactly where most suites give up. This repo demonstrates that those flows can be automated, run in CI, and cover not just the happy path but the **failure modes that matter** when bugs are irreversible and expensive.
+In web3, wallet-driven flows are the hardest and least-automated part of dApp testing. MetaMask popups, network switching, transaction signing, security prompts, and irreversible on-chain state are exactly where most suites give up and start mocking.
+
+This one doesn't mock. Every transaction here is **really signed in a real MetaMask extension** and **really settles on-chain** — and the assertions read the chain back to prove it.
 
 > Maintained by **André Guerra** — [LinkedIn](https://www.linkedin.com/in/andrefgfrancisco)
 
 ---
 
-## What it tests
+## What passes
 
-### Wallet setup & connection
-- Cold connect: import the test wallet, connect MetaMask to the dApp, assert connected account + network.
-- Network switching: the dApp asks the wallet to add + switch to Base Sepolia; we approve it, and also **reject** it and assert graceful handling.
-- Disconnect / reconnect.
+| Suite | Tests | What it proves |
+|---|---|---|
+| **`connection.spec.ts`** | 3 | Cold connect, **reject** the connection, disconnect — plus the add-network / switch-network handshake, asserting the wallet lands on the right chain |
+| **`lending-lifecycle.spec.ts`** | 4 | **supply → borrow → repay → withdraw** against live Aave. Real transactions, verified against on-chain balances |
+| **`edge-cases.spec.ts`** | 3 | User **rejects** a transaction, an over-sized supply is **blocked before it reaches the wallet**, and a wrong-network state **disables actions** instead of letting them fail |
 
-### Happy path (Aave v3, Base Sepolia)
-- Acquire test tokens via the Aave faucet.
-- **Supply** an asset as collateral; assert balances, aToken receipt, and tx confirmation.
-- **Borrow** against collateral; assert borrowed balance + health-factor update.
-- **Repay** the loan; assert debt reduction.
-- **Withdraw** collateral; assert balance returns.
+The lending suite takes ~20 minutes: MetaMask's popup needs ~30s to boot for *each* interaction in headless, and a single supply is two on-chain transactions (ERC-20 approve, then the action). That's the honest cost of not mocking.
 
-### Edge cases & failure modes (the part that signals real QA)
-- User **rejects** the transaction in MetaMask — dApp shows the right error, no state change.
-- **Insufficient collateral / LTV too low** — borrow is blocked with correct messaging.
-- Attempt to **withdraw more than supplied** — blocked.
-- **Wrong network** connected — dApp prompts to switch, actions disabled.
-- **Borrow cap reached / asset not borrowable** — handled.
-- **Pending / slow transaction** — UI reflects the pending state correctly.
+### Assertions worth reading
 
-### Cross-cutting
-- Deterministic, isolated tests (cached wallet setup, clean state per test).
-- Runs headless in CI.
+The point isn't that things pass — it's *what* is asserted:
 
----
+- **Health factor.** Borrowing must produce a health factor **above 1** (the liquidation threshold), and taking on more debt must **lower** it. That number decides whether a user gets liquidated.
+- **On-chain, not the DOM.** A row appearing in the UI only proves the frontend rendered. `utils/onchain.ts` reads balances straight from the node — supplying must *reduce* the wallet balance, withdrawing must *increase* it.
+- **The negative case.** An over-sized supply must be blocked by the dApp *and never reach the wallet at all*. A UI that submits it and lets the chain revert has already failed the user — it costs them gas.
 
-## Tech stack
-- **Language:** TypeScript
-- **Runner:** Playwright
-- **Web3 wallet automation:** Synpress **4.1.2** (`@synthetixio/synpress`) for the cached-wallet architecture — though most of its runtime turned out to be broken against the MetaMask it ships, and had to be replaced (see *Working around Synpress*)
-- **Wallet:** MetaMask **13.13.1**, driven directly
-- **Network:** **Base Sepolia** testnet (Aave's only live testnet market)
-- **Target dApp:** Aave v3 testnet market (`app.aave.com`, testnet mode)
-- **CI:** GitHub Actions
+### Two things the protocol taught me
 
-> ⚠️ Synpress evolves quickly. This suite was scaffolded against **Synpress 4.1.2**. Before changing the wallet layer, re-check the current version (`npm view @synthetixio/synpress version`) and the API at **docs.synpress.io**.
+Written into the tests, because they're easy to get wrong:
+
+- **You cannot fully repay a loan with only what you borrowed.** Interest accrues from the moment you borrow, so the debt is always a hair larger than the tokens received. A test asserting "debt hits exactly zero" is asserting something the protocol *cannot do*. So repay asserts the health factor **rises**.
+- **The chain is persistent.** A wallet that borrowed in an earlier run still carries that position. Assertions must hold on *any* wallet state, not just a pristine one.
 
 ---
 
-## Prerequisites
-- **Linux or macOS — or Windows via WSL2** (see below). The Synpress CLI refuses to run on native Windows.
-- Node.js 18+ and pnpm (or npm)
-- A **dedicated, throwaway** MetaMask wallet — see *Security notes*. **Never** use a wallet that holds real funds.
-- **Base Sepolia** ETH for gas (bridge from Sepolia, or a Base Sepolia faucet) — NOT Ethereum Sepolia ETH
-- Aave test tokens (from the Aave testnet faucet inside the app)
-- (Optional) A Base Sepolia RPC URL, for on-chain assertions
+## Working around a broken toolchain
 
-> ### ⚠️ Windows users: use WSL2
-> Synpress's cache builder exits with *"Sorry, Windows is currently not supported. Please use WSL instead!"*, so the suite must be driven from a Linux environment.
->
-> ```bash
-> wsl -d Ubuntu                     # from PowerShell
->
-> # Node must be a LINUX build — a Windows Node on $PATH via /mnt/c will fail.
-> curl -fsSL https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.1/install.sh | bash
-> source ~/.nvm/nvm.sh && nvm install 20 && corepack enable && corepack prepare pnpm@10 --activate
->
-> # Chromium's system libraries (needs root):
-> sudo apt-get update && sudo apt-get install -y libnss3 libnspr4 libasound2t64
->
-> cd /mnt/c/path/to/crispy-guide
-> pnpm install                      # installs Linux-native binaries
-> pnpm exec playwright install chromium
-> ```
->
-> WSL2 on Windows 11 ships **WSLg**, so `pnpm run test:headed` opens a real browser window — which is how you verify the dApp selectors. Run `pnpm install` from *inside* WSL: a `node_modules` installed on Windows carries win32 binaries (esbuild, Chromium) that Linux can't execute.
-
-## Setup
-1. `pnpm install` (installs Playwright + Synpress; Synpress downloads the MetaMask build on first cache run)
-2. Copy `.env.example` → `.env` and fill in:
-   ```dotenv
-   SEED_PHRASE=...        # throwaway TEST wallet only
-   WALLET_PASSWORD=...    # any value; used for the in-test MetaMask
-   DAPP_URL=https://app.aave.com/?marketName=proto_base_sepolia_v3
-   ```
-   Then fund the wallet with **Base Sepolia** ETH:
-   ```bash
-   pnpm run wallet:address   # prints the address to fund
-   pnpm run wallet:balance   # checks Base Sepolia + Sepolia balances
-   ```
-3. Build the wallet cache: `pnpm run build:cache` (headed) or `pnpm run build:cache:headless`
-4. Run the tests (below)
-
-> The wallet cache is keyed by a hash of the wallet-setup function. Change `wallet-setup/basic.setup.ts` and you must rebuild the cache.
->
-> `build:cache` downloads MetaMask (`scripts/fetch-metamask.sh`) and then builds the browser profile with **our own builder** rather than the `synpress` CLI — see *Working around Synpress*. It verifies its own output, so if it prints ✅ the wallet really is in there.
-
-## Running the tests
-```bash
-pnpm test              # headless
-pnpm run test:headed   # watch it drive MetaMask
-pnpm run test:ui       # Playwright UI mode
-pnpm run report        # open the last HTML report
-```
-
-## Project structure
-```
-.
-├─ wallet-setup/
-│  └─ basic.setup.ts        # import wallet, finish MetaMask onboarding
-├─ tests/
-│  ├─ connection.spec.ts
-│  ├─ supply-borrow.spec.ts
-│  ├─ repay-withdraw.spec.ts
-│  └─ edge-cases.spec.ts
-├─ fixtures/
-│  └─ metamask.ts           # testWithMetaMask fixture (replaces Synpress's)
-├─ utils/
-│  ├─ selectors.ts          # dApp selectors in one place
-│  ├─ metamask-actions.ts   # wallet-popup actions (working MetaMask selectors)
-│  ├─ wallet-cache.ts       # profile paths, launch args, unlock
-│  └─ helpers.ts
-├─ scripts/
-│  ├─ fetch-metamask.sh     # download + extract MetaMask
-│  ├─ build-cache.ts        # builds & verifies the wallet cache (replaces the CLI)
-│  ├─ wallet-address.ts     # prints the test wallet address (for funding)
-│  └─ check-balance.ts      # Base Sepolia / Sepolia balances
-├─ .github/workflows/e2e.yml
-├─ playwright.config.ts
-├─ .env.example
-└─ README.md
-```
-
-## The pattern
-
-We do **not** use Synpress's `testWithSynpress` / `metaMaskFixtures` — they're broken against the MetaMask they ship (see below). The fixture is our own, and specs read like this:
-
-```ts
-import { test, expect } from '../fixtures/metamask'
-import { connectWallet, expectConnected } from '../utils/helpers'
-
-// `context` + `extensionId` come from the fixture; the wallet is already
-// imported (from the cached profile) and unlocked.
-test('connects wallet to the dApp', async ({ page, context, extensionId }) => {
-  await connectWallet(page, context, extensionId)
-  await expectConnected(page)
-})
-```
-
-Wallet popups are driven through `utils/metamask-actions.ts`:
-
-```ts
-import * as mm from '../utils/metamask-actions'
-
-await mm.confirmTransaction(context, extensionId)
-await mm.rejectTransaction(context, extensionId)
-await mm.approveSwitchNetwork(context, extensionId)
-```
-
-Synpress is still used for two things that *do* work: `defineWalletSetup` (which hashes the setup function to key the cache) and its `MetaMask` class for the onboarding/import flow.
-
-## CI
-GitHub Actions runs the suite headless on push / PR, under `xvfb` (Chromium extensions need a display server even with `--headless=new`), caching the downloaded MetaMask build and the Playwright browsers.
-
-**Required repository secrets** (Settings → Secrets and variables → Actions) — a throwaway wallet only:
-
-| Secret | Purpose |
-|---|---|
-| `SEED_PHRASE` | The throwaway test wallet to import |
-| `WALLET_PASSWORD` | Password for the in-test MetaMask |
-
-That's all: the wallet is imported from the seed, and the dApp drives any network switching itself, so no RPC URL is needed.
-
-CI runs **`pnpm run test:ci`**, which currently executes the *verified* specs only (`connection.spec.ts`). The supply/borrow/repay/withdraw and edge-case specs need a funded wallet and still have unverified selectors — running them would make the badge red for reasons unrelated to the code under test. Each spec moves into `test:ci` as it is confirmed green. **The badge should only ever claim what actually passes.**
-
-The connection tests spend **no gas**, so CI is free to run on every push.
-
-## Security notes (read this)
-- Use a **brand-new wallet created only for testing.** It must never hold mainnet assets.
-- Keep `SEED_PHRASE` / private keys in `.env` (gitignored) locally, and in **GitHub secrets** for CI. Never commit them.
-- Only ever point tests at **testnets.**
-- Treat the seed phrase as compromised the moment it touches CI — it's a throwaway, so that's fine by design.
-
----
-
-## Roadmap
-- [x] **Phase 0** — Scaffold project, config, env, CI skeleton
-- [x] **Phase 1** — Wallet setup + connection tests **— green against live Aave**
-- [x] **Phase 2** — Happy-path supply / borrow / repay / withdraw *(written; needs a funded wallet to verify)*
-- [x] **Phase 3** — Edge cases & failure modes *(written; needs a funded wallet to verify)*
-- [ ] **Phase 4** — Green CI + status badge
-- [ ] **Phase 5** — Demo gif / video
-
-### Current status (honest)
-
-| Suite | State |
-|---|---|
-| `connection.spec.ts` (3 tests) | ✅ **Passing** against live `app.aave.com` with a real MetaMask — **headed and headless** |
-| `supply-borrow` / `repay-withdraw` / `edge-cases` | ⚠️ Written and type-checked, **not yet verified** — they need a wallet funded with **Base Sepolia** ETH + Aave faucet tokens, and their Aave selectors (`utils/selectors.ts`) still need confirming against the live UI |
-
-The connection flow is the part that proves the hard bit works: a cached MetaMask, unlocked, driving a real dApp, approving and **rejecting** in the wallet popup. The remaining specs reuse exactly that machinery.
-
----
-
-## Working around Synpress (the interesting part)
-
-**Synpress 4.1.2 is broken against the MetaMask build it ships.** It pins MetaMask `13.13.1`, but its page objects predate MetaMask's multichain redesign. Getting to green meant diagnosing and routing around several real bugs — documented here because "the tool was broken and I fixed it" is the whole point of a QA portfolio.
+**Synpress 4.1.2 — the standard tool for this job — is broken against the MetaMask it ships.** It pins MetaMask `13.13.1` (the current release is `13.39.x`) and most of its runtime had to be replaced. This was the bulk of the work, and it's the part worth reading.
 
 | Problem | Reality | Fix |
 |---|---|---|
-| `synpress wallet-setup` CLI | Refuses to run on Windows; under WSL it hot-loops at ~96% CPU and never launches a browser | Replaced with [`scripts/build-cache.ts`](scripts/build-cache.ts), which builds the same profile directly |
-| `importWallet()` | Stops at MetaMask's "Your wallet is ready!" screen and never clicks **Open wallet**, so onboarding never completes and the wallet home never renders | [`wallet-setup/basic.setup.ts`](wallet-setup/basic.setup.ts) finishes onboarding itself |
-| `metaMaskFixtures()` | Its `unlockForFixture` never types the password in headless — every test dies with `Test timeout exceeded while setting up "page"`. **Passes headed, fails in CI.** | Replaced with our own fixture, [`fixtures/metamask.ts`](fixtures/metamask.ts) |
-| `connectToDapp()` | Clicks `[data-testid="page-container-footer-next"]` — gone. The button is now `confirm-btn` | [`utils/metamask-actions.ts`](utils/metamask-actions.ts) |
-| `switchNetwork()` / `addNetwork()` / `getAccountAddress()` | Depend on `network-display` / `address-copy-button-text`, which the redesign **removed entirely** — there is no longer a single "current network" element | Not used. The dApp requests the network switch itself and we approve it in the popup — which is the realistic user flow anyway |
-| Cache built but tests saw "Create a new wallet" | The vault needs time to flush to disk; closing the browser too early yields a profile that *looks* built but has no wallet | The builder now **self-verifies** by reopening the profile and asserting the unlock screen appears |
+| **MetaMask 13.13.1 cannot broadcast transactions on Base Sepolia** | It mangles the RPC payload (`failed to decode param in array[0] invalid JSON input`) on an endpoint viem talks to happily. The dApp just says "Transaction failed". Every transaction test was dead on arrival. | Proved it with a control experiment (below), then upgraded to **13.39.1** |
+| `synpress wallet-setup` CLI | Refuses to run on Windows; under WSL it hot-loops at ~96% CPU and never launches a browser | Replaced with [`scripts/build-cache.ts`](scripts/build-cache.ts), which **self-verifies** the wallet really persisted |
+| `metaMaskFixtures()` | Never types the password in headless — every test dies with `Test timeout exceeded while setting up "page"`. **Passes headed, fails in CI.** | Our own fixture, [`fixtures/metamask.ts`](fixtures/metamask.ts) |
+| `MetaMask.importWallet()` | Targets an onboarding flow that no longer exists | [`utils/onboarding.ts`](utils/onboarding.ts) |
+| `connectToDapp()` / `switchNetwork()` / `getAccountAddress()` | Target elements MetaMask's redesign **deleted** | [`utils/metamask-actions.ts`](utils/metamask-actions.ts) |
+
+Synpress is now used for exactly one thing that still works: `defineWalletSetup`, which hashes the setup function to key the wallet cache.
+
+### The control experiment
+
+The faucet kept reporting "Transaction failed" and it looked like a contract revert. Instead of guessing, I intercepted the exact `eth_sendTransaction` payload the dApp handed to the wallet, confirmed it was well-formed, and **replayed that identical transaction through viem on the same RPC** — where it succeeded immediately.
+
+Same transaction, same chain, same endpoint, same wallet. Works via viem, fails via MetaMask. That isolates the bug to the wallet, not the dApp, not the chain, not the RPC — and it's what justified the version upgrade. ([`scripts/mint-test-tokens.ts`](scripts/mint-test-tokens.ts) is the surviving harness.)
 
 ### MetaMask in headless is a different animal
 
-The suite passed headed and failed in CI. Three separate reasons, none of them obvious:
+The suite passed headed and failed in CI. Three reasons, none obvious:
 
-1. **No popup window exists.** Under `--headless=new` MetaMask never creates its confirmation window, so waiting for one hangs forever. The pending request *is* still served at `notification.html`, so we open that page ourselves.
-2. **`load` never fires** on MetaMask's pages. A default `page.goto()` therefore blocks until it times out — and `page.reload()` has *no* timeout by default, so it hung indefinitely and silently ate the entire test budget. Everything now waits on `domcontentloaded` and is explicitly bounded.
-3. **MetaMask takes ~30 seconds to boot** its notification UI in headless, sitting as an empty shell first. The instinctive fix — retry/reload until it renders — is exactly wrong: each reload *restarts* that boot, so it never finishes. You have to wait it out.
+1. **No popup window exists** under `--headless=new`. Waiting for one hangs forever. The pending request *is* still served at `notification.html`, so we open that page ourselves.
+2. **`load` never fires** on MetaMask's pages, so a default `goto()` burns its timeout — and `page.reload()` has *no* timeout by default, so it hung indefinitely and silently ate the whole test budget.
+3. **MetaMask takes ~30s to boot** its notification UI, sitting blank first. The instinctive fix — reload until it renders — is exactly wrong: each reload **restarts** that boot, so it never finishes.
 
-Also: never close-and-reopen the notification page to retry. Closing that window is how a user **rejects** a request, so retrying that way silently kills the very request you're waiting for.
+Plus: never close-and-reopen that page to retry. Closing MetaMask's notification window is how a user **rejects** — retrying that way silently kills the request you're waiting for.
 
-That last set is why a connect flow takes ~4 minutes in CI, and why `timeout` in [`playwright.config.ts`](playwright.config.ts) is generous. The bounded action/navigation timeouts are what catch a genuine hang.
+### MetaMask's security scanner blocks automation
 
-All wallet-popup interaction lives in **one file** — [`utils/metamask-actions.ts`](utils/metamask-actions.ts). If MetaMask's UI shifts again, that's the only thing to fix.
+MetaMask's Blockaid scanner has no reputation data for **testnet** contracts, so it flags Aave's legitimate pool as a **"Malicious address"** — *"you will probably lose your assets to a scammer"* — and stacks **two** gates in front of every transaction:
+
+1. `"Malicious address"` → an informational modal ("Got it")
+2. `"Your assets may be at risk"` → an acknowledgement checkbox, then a Confirm **inside** that modal (the footer Confirm merely reopens it)
+
+Unhandled, transactions never sign and the dApp waits forever. Handled in `metamask-actions.ts` — with a warning **not** to copy that pattern anywhere near mainnet, where the alert may well be telling the truth.
+
+### Aave's selectors, for the record
+
+Its modal is a MUI `role="presentation"` — **never** `role="dialog"`, so every `getByRole('dialog')` locator silently matches nothing. The rest is `data-cy`, with traps:
+
+| Element | Hook | Trap |
+|---|---|---|
+| Modal | `Modal` | Not a `dialog` role |
+| Approve step | `approvalButton` | **Separate** from the action button — an ERC-20 flow is two transactions, two stacked buttons, one enabled at a time |
+| Action step | `actionButton` | Disabled until the approval lands |
+| Amount field | *(the only `<input>`)* | `data-cy="inputAsset"` is a red herring — it's the `<h3>` showing "USDC" |
+| Supplied row | `dashboardSuppliedListItem_USDC_Collateral` | Aave appends a **state suffix**; an exact match finds nothing |
+
+All of it lives in [`utils/selectors.ts`](utils/selectors.ts). One file to fix when Aave ships a redesign.
 
 ---
 
-## Quality bar
-- Tests are deterministic and independent: they rely on the cached wallet state and assert their own preconditions.
-- Selectors prefer role/text; every dApp-specific selector lives in `utils/selectors.ts`, not scattered through specs.
-- Each edge-case test asserts the **correct** failure (right message / blocked action / unchanged state), not merely that "something happened".
-- Secrets are read from env only and never logged.
+## Running it
+
+### Prerequisites
+- **Linux, macOS, or Windows via WSL2** — the Synpress CLI refuses to run on native Windows
+- Node.js 18+ and pnpm
+- A **dedicated, throwaway** wallet. Never one that holds real funds.
+- **Base Sepolia** ETH for gas (not Ethereum Sepolia — different chain)
+
+### Setup
+```bash
+pnpm install
+cp .env.example .env          # add SEED_PHRASE + WALLET_PASSWORD
+
+pnpm run wallet:address       # the address to fund
+pnpm run wallet:balance       # check Base Sepolia gas + USDC
+pnpm run mint:tokens          # mint test USDC (faucet has a mint timelock)
+
+pnpm run build:cache          # import the wallet once; cached and reused
+```
+
+### Tests
+```bash
+pnpm test                     # everything, headless
+pnpm run test:ci              # the fast suite CI runs (connection)
+pnpm run test:headed          # watch it drive MetaMask
+pnpm run report               # last HTML report
+```
+
+> Test tokens are a **precondition**, not the thing under test — Aave's faucet enforces a mint timelock, so driving it every run would guarantee flakes. `mint:tokens` handles it out-of-band.
+
+<details>
+<summary><b>Windows: WSL2 setup</b></summary>
+
+```bash
+wsl -d Ubuntu
+
+# Node must be a LINUX build — a Windows Node on $PATH via /mnt/c will fail.
+curl -fsSL https://raw.githubusercontent.com/nvm-sh/nvm/v0.40.1/install.sh | bash
+source ~/.nvm/nvm.sh && nvm install 20 && corepack enable && corepack prepare pnpm@10 --activate
+
+sudo apt-get update && sudo apt-get install -y libnss3 libnspr4 libasound2t64
+
+cd /mnt/c/path/to/crispy-guide
+pnpm install                  # from INSIDE WSL: a Windows node_modules carries
+pnpm exec playwright install chromium   # win32 binaries Linux can't execute
+```
+WSL2 ships **WSLg**, so `test:headed` opens a real browser window.
+</details>
 
 ---
 
-## Decision points for André
+## Project structure
+```
+├─ tests/
+│  ├─ connection.spec.ts        # connect / reject / disconnect + network handshake
+│  ├─ lending-lifecycle.spec.ts # supply → borrow → repay → withdraw (serial)
+│  └─ edge-cases.spec.ts        # rejection, blocked actions, wrong network
+├─ fixtures/metamask.ts         # cached, unlocked wallet per test
+├─ utils/
+│  ├─ selectors.ts              # every dApp selector, one file
+│  ├─ metamask-actions.ts       # every wallet popup, one file
+│  ├─ onboarding.ts             # imports the wallet (replaces Synpress)
+│  ├─ onchain.ts                # balances read from the node (viem)
+│  ├─ networks.ts               # Base Sepolia
+│  └─ helpers.ts                # behaviour-level flows
+├─ scripts/
+│  ├─ build-cache.ts            # builds + verifies the wallet cache
+│  ├─ fetch-metamask.sh         # downloads MetaMask
+│  ├─ mint-test-tokens.ts       # mints test USDC on-chain
+│  ├─ wallet-address.ts         # the address to fund
+│  └─ check-balance.ts          # gas + token balances
+└─ .github/workflows/e2e.yml
+```
 
-- [x] **Target dApp — SELECTED: Aave v3 (Sepolia).** Reliable Sepolia testnet, in-app faucet, rich multi-step flows (supply → borrow → repay → withdraw), and documented revert cases (insufficient collateral, LTV limits, borrow caps) that turn straight into edge-case tests. To repurpose: a DEX (e.g. a Uniswap testnet deployment) or an L2 market (Aave on Base / Arbitrum Sepolia) — verify the testnet is live first.
-- [x] **Network — Base Sepolia.** Not a preference: Aave has retired its Ethereum Sepolia market, and Base Sepolia is the only testnet market left. The test wallet therefore needs **Base Sepolia** ETH for gas.
-- [x] **Runner — Playwright.** Synpress also supports Cypress.
-- [ ] **Repo name + identity.** Repo is `crispy-guide`; rename if you like. Name + LinkedIn are in *Why this exists*.
+**The design rule:** every dApp selector lives in `selectors.ts`, every wallet interaction in `metamask-actions.ts`. MetaMask and Aave both ship UI changes constantly — when they do, there is exactly one file to fix.
 
-## Stretch goals (next portfolio pieces)
-- Add a **Foundry** suite that forks Sepolia/mainnet and tests a protocol's contracts directly (fuzz + invariant tests).
-- Open a **test-coverage PR** to an open-source protocol's repo.
-- Write a short post breaking down one bug or edge case you found, and how the suite catches it.
+---
+
+## CI
+
+GitHub Actions runs headless under `xvfb` on push / PR, caching the MetaMask build and Playwright browsers.
+
+**Required secrets** (a throwaway wallet only): `SEED_PHRASE`, `WALLET_PASSWORD`.
+
+CI runs **`test:ci`** — the connection suite, which spends **no gas** and so can run free on every push. The lending lifecycle is deliberately *not* in CI: it costs real (testnet) gas, takes ~20 minutes, and mutates on-chain state, which makes it a poor fit for a per-push gate. Run it locally or on a schedule.
+
+## Security notes
+- Use a **brand-new wallet created only for testing.** It must never hold mainnet assets.
+- `SEED_PHRASE` lives in `.env` (gitignored) and GitHub secrets. Never in the repo.
+- Only ever point this at **testnets**.
+- Treat the seed as compromised the moment it touches CI — it's a throwaway, so that's fine by design.
+
+## Next
+- [ ] A **Foundry** suite that forks the chain and tests the contracts directly (fuzz + invariant tests)
+- [ ] Liquidation: push a position below health factor 1 and assert it's liquidatable
+- [ ] Report the MetaMask 13.13.1 Base Sepolia broadcast bug upstream
 
 ## References
-- Synpress docs — https://docs.synpress.io
-- Synpress (npm) — https://www.npmjs.com/package/@synthetixio/synpress
-- Aave testing & debugging docs — https://aave.com/docs
-- Playwright docs — https://playwright.dev
+- Aave — https://aave.com/docs · Synpress — https://docs.synpress.io · Playwright — https://playwright.dev

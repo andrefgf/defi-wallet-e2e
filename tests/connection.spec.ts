@@ -1,6 +1,11 @@
 import { test, expect } from '../fixtures/metamask'
 import { connect } from '../utils/selectors'
-import { connectWallet, expectConnected, dismissAnalyticsPrompt } from '../utils/helpers'
+import {
+  connectWallet,
+  expectConnected,
+  expectOnBaseSepolia,
+  dismissAnalyticsPrompt,
+} from '../utils/helpers'
 import * as mm from '../utils/metamask-actions'
 
 /**
@@ -14,11 +19,20 @@ import * as mm from '../utils/metamask-actions'
  * MetaMask class, whose selectors are broken against MetaMask 13.13.1.
  */
 test.describe('Wallet connection', () => {
-  test('cold connect: connects MetaMask to the dApp', async ({ page, context, extensionId }) => {
+  test('cold connect: connects MetaMask to the dApp on Base Sepolia', async ({
+    page,
+    context,
+    extensionId,
+  }) => {
     await connectWallet(page, context, extensionId)
 
-    // The dApp reflects a connected account (an 0x… address in the header).
+    // The dApp reflects a connected account (an 0x… address in the header)...
     await expectConnected(page)
+
+    // ...AND the wallet is on the market's network. Asserting only the account
+    // is a trap: on the wrong chain Aave still shows you as connected, then
+    // disables every action with "Wrong Network". This suite shipped that bug.
+    await expectOnBaseSepolia(page)
   })
 
   test('rejecting the connection leaves the dApp disconnected', async ({

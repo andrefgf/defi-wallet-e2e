@@ -1,14 +1,77 @@
 import { expect, type BrowserContext, type Page } from '@playwright/test'
-import { connect, dashboard, markets, modal } from './selectors'
+import { connect, dashboard, modal, nav } from './selectors'
 import * as mm from './metamask-actions'
+import { BASE_SEPOLIA, addChainParams } from './networks'
 
 /**
- * Cross-cutting helpers shared by the specs. Anything dApp-specific that is
- * more than a single locator lives here so specs read as behaviour, not DOM.
- *
- * Note: wallet popups go through `utils/metamask-actions`, not Synpress's
- * MetaMask class — see that file for why.
+ * Behaviour-level helpers. Specs read as user intent; the DOM lives in
+ * `selectors.ts` and the wallet popups in `metamask-actions.ts`.
  */
+
+// --- Network ----------------------------------------------------------------
+
+/** Ask the connected wallet which chain it is on (EIP-1193). */
+async function currentChainId(page: Page): Promise<string | null> {
+  return page
+    .evaluate(async () => {
+      const eth = (window as unknown as { ethereum?: { request(a: unknown): Promise<string> } })
+        .ethereum
+      if (!eth) return null
+      return eth.request({ method: 'eth_chainId' })
+    })
+    .catch(() => null)
+}
+
+/**
+ * Guarantee MetaMask is on the market's network, adding it if necessary.
+ *
+ * Not book-keeping — load-bearing. MetaMask doesn't ship with Base Sepolia, and
+ * Aave's own switch attempt is unreliable ("We couldn't switch the network
+ * automatically"). On the wrong chain the dApp still reports a *connected*
+ * account while silently disabling every action, so tests connect happily and
+ * then fail somewhere far away. `wallet_addEthereumChain` both adds and offers
+ * to switch, so it covers the already-added case too.
+ */
+export async function ensureNetwork(
+  page: Page,
+  context: BrowserContext,
+  extensionId: string,
+): Promise<void> {
+  if ((await currentChainId(page)) === BASE_SEPOLIA.chainIdHex) return
+
+  // Don't await yet: this promise doesn't settle until the MetaMask prompts it
+  // raises are answered, which is what we do next.
+  const request = page
+    .evaluate(async (params) => {
+      const eth = (window as unknown as { ethereum?: { request(a: unknown): Promise<unknown> } })
+        .ethereum
+      await eth?.request({ method: 'wallet_addEthereumChain', params: [params] }).catch(() => {})
+    }, addChainParams())
+    .catch(() => {})
+
+  await mm.approveFollowUpRequests(context, extensionId)
+  await request
+
+  const deadline = Date.now() + 60_000
+  while (Date.now() < deadline) {
+    if ((await currentChainId(page)) === BASE_SEPOLIA.chainIdHex) return
+    await page.waitForTimeout(1000)
+  }
+
+  throw new Error(
+    `Wallet is not on ${BASE_SEPOLIA.chainName} — it reports ${await currentChainId(page)}. ` +
+      'Aave will show "Wrong Network" and disable every action.',
+  )
+}
+
+/** Assert the wallet is on the market's network. */
+export async function expectOnBaseSepolia(page: Page): Promise<void> {
+  expect(await currentChainId(page), `wallet should be on ${BASE_SEPOLIA.chainName}`).toBe(
+    BASE_SEPOLIA.chainIdHex,
+  )
+}
+
+// --- Connection -------------------------------------------------------------
 
 /** Dismiss Aave's first-load analytics consent prompt, if shown. */
 export async function dismissAnalyticsPrompt(page: Page): Promise<void> {
@@ -19,43 +82,130 @@ export async function dismissAnalyticsPrompt(page: Page): Promise<void> {
 }
 
 /**
- * Connect the wallet to the dApp from a fresh page load: open the wallet
- * picker, choose MetaMask, and approve in the extension popup.
+ * Connect the wallet, but do NOT force the network.
+ *
+ * Aave lands the wallet on whatever chain it fancies (we've watched it add
+ * Avalanche Fuji), so this leaves the dApp in its natural wrong-network state —
+ * which is precisely what the wrong-network edge case needs to observe.
  */
-export async function connectWallet(
+export async function connectWalletWithoutNetworkSwitch(
   page: Page,
   context: BrowserContext,
   extensionId: string,
 ): Promise<void> {
   await page.goto('/')
   await page.waitForLoadState('domcontentloaded')
-
   await dismissAnalyticsPrompt(page)
 
   await connect.connectWalletButton(page).click()
 
   const mmOption = connect.metaMaskOption(page)
-  await mmOption.waitFor({ state: 'visible', timeout: 15_000 })
+  await mmOption.waitFor({ state: 'visible', timeout: 20_000 })
   await mmOption.click()
 
   await mm.connectToDapp(context, extensionId)
-
-  // Approving the connection is not the end of it: the market runs on Base
-  // Sepolia, which MetaMask doesn't ship with, so Aave immediately asks the
-  // wallet to add that network and switch to it. Until those are approved the
-  // dApp stays on "Requesting Connection" and never reports a connected account.
   await mm.approveFollowUpRequests(context, extensionId)
 }
 
-/** Assert the dApp shows a connected account (a 0x… address in the header). */
+/** Connect the wallet to the dApp and land on the market's network. */
+export async function connectWallet(
+  page: Page,
+  context: BrowserContext,
+  extensionId: string,
+): Promise<void> {
+  await connectWalletWithoutNetworkSwitch(page, context, extensionId)
+
+  // Approving the connection is not the end of the handshake: Aave immediately
+  // asks the wallet to add Base Sepolia and switch to it.
+  await ensureNetwork(page, context, extensionId)
+}
+
+/** Assert the dApp shows a connected account. */
 export async function expectConnected(page: Page): Promise<void> {
   await expect(connect.accountChip(page)).toBeVisible({ timeout: 30_000 })
 }
 
+// --- Transaction flows ------------------------------------------------------
+
 /**
- * Open the supply modal for an asset, enter an amount, and confirm — handling
- * the optional ERC-20 approval step and the MetaMask confirmation popup.
+ * Run a modal action to completion: click it, approve every MetaMask screen it
+ * raises (an ERC-20 flow is approve-then-act: two transactions), and wait for
+ * Aave's terminal state.
+ *
+ * Fails loudly on "Transaction failed" rather than waiting out the timeout, so
+ * a reverted transaction reads as a reverted transaction.
  */
+/** Click whichever action button Aave currently has enabled. */
+async function clickEnabledAction(page: Page): Promise<boolean> {
+  const buttons = modal.actionButtons(page)
+  const count = await buttons.count().catch(() => 0)
+
+  for (let i = 0; i < count; i++) {
+    const button = buttons.nth(i)
+    const usable =
+      (await button.isVisible().catch(() => false)) && (await button.isEnabled().catch(() => false))
+    if (usable) {
+      await button.click()
+      return true
+    }
+  }
+  return false
+}
+
+/** Wait until Aave enables an action, or reaches a terminal state. */
+async function waitForEnabledAction(page: Page, timeoutMs = 90_000): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs
+
+  while (Date.now() < deadline) {
+    if (await modal.success(page).isVisible().catch(() => false)) return false
+    if (await modal.failure(page).isVisible().catch(() => false)) return false
+
+    const buttons = modal.actionButtons(page)
+    const count = await buttons.count().catch(() => 0)
+    for (let i = 0; i < count; i++) {
+      const button = buttons.nth(i)
+      if (
+        (await button.isVisible().catch(() => false)) &&
+        (await button.isEnabled().catch(() => false))
+      ) {
+        return true
+      }
+    }
+    await page.waitForTimeout(1000)
+  }
+  return false
+}
+
+async function submitModalAction(
+  page: Page,
+  context: BrowserContext,
+  extensionId: string,
+): Promise<void> {
+  // An ERC-20 flow is TWO on-chain transactions, and Aave renders them as two
+  // buttons stacked in the same modal — "Approve USDC to continue" (enabled) and
+  // "Supply USDC" (disabled until the allowance lands). Only one is ever usable
+  // at a time, and the enabled one is NOT necessarily the last in the DOM.
+  // So: click whichever is live, sign it, wait for the next to wake up, repeat.
+  for (let step = 0; step < 3; step++) {
+    if (!(await waitForEnabledAction(page))) break
+
+    await clickEnabledAction(page)
+    await mm.approveFollowUpRequests(context, extensionId)
+  }
+
+  await expect(modal.success(page).or(modal.failure(page))).toBeVisible({ timeout: 180_000 })
+  await expect(modal.failure(page), 'the transaction reverted on-chain').toBeHidden()
+}
+
+async function closeModal(page: Page): Promise<void> {
+  const close = modal.closeButton(page)
+  if (await close.isVisible().catch(() => false)) {
+    await close.click().catch(() => {})
+  }
+}
+
+
+/** Supply an asset as collateral. */
 export async function supply(
   page: Page,
   context: BrowserContext,
@@ -63,23 +213,14 @@ export async function supply(
   asset: string,
   amount: string,
 ): Promise<void> {
-  await markets.supplyButton(page, asset).click()
-  await fillAmount(page, amount)
-
-  // Optional approval step (first-time allowance for this token).
-  const approve = modal.approveButton(page)
-  if (await approve.isEnabled().catch(() => false)) {
-    await approve.click()
-    await mm.confirmTransaction(context, extensionId)
-  }
-
-  await modal.primaryAction(page, /supply/i).click()
-  await mm.confirmTransaction(context, extensionId)
-  await expect(modal.successMessage(page)).toBeVisible({ timeout: 60_000 })
+  await nav.dashboard(page).click()
+  await dashboard.supplyButton(page, asset).click()
+  await modal.amountInput(page).fill(amount)
+  await submitModalAction(page, context, extensionId)
   await closeModal(page)
 }
 
-/** Borrow an amount of an asset against existing collateral. */
+/** Borrow an asset against existing collateral. */
 export async function borrow(
   page: Page,
   context: BrowserContext,
@@ -87,35 +228,65 @@ export async function borrow(
   asset: string,
   amount: string,
 ): Promise<void> {
-  await markets.borrowButton(page, asset).click()
-  await fillAmount(page, amount)
-  await modal.primaryAction(page, /borrow/i).click()
-  await mm.confirmTransaction(context, extensionId)
-  await expect(modal.successMessage(page)).toBeVisible({ timeout: 60_000 })
+  await nav.dashboard(page).click()
+  await dashboard.borrowButton(page, asset).click()
+  await modal.amountInput(page).fill(amount)
+  await submitModalAction(page, context, extensionId)
   await closeModal(page)
 }
 
-async function fillAmount(page: Page, amount: string): Promise<void> {
-  const input = modal.amountInput(page)
-  await expect(input).toBeVisible()
-  await input.fill(amount)
-}
-
-async function closeModal(page: Page): Promise<void> {
-  const close = modal.closeButton(page)
-  if (await close.isVisible().catch(() => false)) {
-    await close.click()
-  }
+/** Repay borrowed debt. */
+export async function repay(
+  page: Page,
+  context: BrowserContext,
+  extensionId: string,
+  asset: string,
+): Promise<void> {
+  await nav.dashboard(page).click()
+  await dashboard.repayButton(page, asset).click()
+  await modal.maxButton(page).click()
+  await submitModalAction(page, context, extensionId)
+  await closeModal(page)
 }
 
 /**
- * Read the health-factor number from the dashboard, or `null` if absent.
- * Useful for asserting a borrow lowered the factor / a repay raised it.
+ * Withdraw supplied collateral.
+ *
+ * Takes an explicit amount rather than clicking MAX: while any debt is
+ * outstanding, Aave caps what may be withdrawn (pulling all the collateral
+ * would leave the loan unsecured), so a MAX withdraw is not generally
+ * available mid-position.
+ */
+export async function withdraw(
+  page: Page,
+  context: BrowserContext,
+  extensionId: string,
+  asset: string,
+  amount: string,
+): Promise<void> {
+  await nav.dashboard(page).click()
+  await dashboard.withdrawButton(page, asset).click()
+  await modal.amountInput(page).fill(amount)
+  await submitModalAction(page, context, extensionId)
+  await closeModal(page)
+}
+
+/**
+ * Health factor from the dashboard, or `null` when there isn't one.
+ *
+ * `null` is a real state, not a failure: with no debt the health factor is
+ * infinite, and Aave simply doesn't render it. It only appears once you borrow —
+ * which is exactly what makes it worth asserting on either side of a borrow.
+ *
+ * Read from the page text rather than a hook: the panel's `data-cy` only exists
+ * while a position does, so a locator-based read can't distinguish "no health
+ * factor" from "selector is wrong".
  */
 export async function readHealthFactor(page: Page): Promise<number | null> {
-  const el = dashboard.healthFactor(page)
-  if (!(await el.isVisible().catch(() => false))) return null
-  const text = (await el.innerText()).replace(/[^\d.]/g, '')
-  const value = Number.parseFloat(text)
+  const text = await page.locator('body').innerText().catch(() => '')
+  const match = text.match(/health factor[^\d]*(\d+(?:\.\d+)?)/i)
+  if (!match?.[1]) return null
+
+  const value = Number.parseFloat(match[1])
   return Number.isFinite(value) ? value : null
 }

@@ -90,6 +90,66 @@ async function hasRendered(page: Page): Promise<boolean> {
 }
 
 /**
+ * Clear MetaMask's "Malicious address" security alert, if it's blocking us.
+ *
+ * MetaMask's Blockaid scanner has no reputation data for TESTNET contracts, so
+ * it flags Aave's perfectly legitimate approval/pool contracts as malicious:
+ *
+ *   "If you confirm this request, you will probably lose your assets to a
+ *    scammer."
+ *
+ * It then swaps the Confirm button for "Review alert" and refuses to proceed
+ * until the risk is explicitly acknowledged — which silently stalls every
+ * automated transaction. We tick the acknowledgement and carry on.
+ *
+ * (This is a false positive on a testnet, with play-money. Do NOT copy this
+ * pattern into anything that touches mainnet: there, the alert may well be
+ * telling the truth.)
+ */
+async function dismissSecurityAlert(page: Page): Promise<boolean> {
+  // There are TWO gates, back to back:
+  //
+  //  1. "Malicious address"        → an informational modal with a "Got it".
+  //  2. "Your assets may be at risk" → tick an acknowledgement, then press the
+  //     Confirm INSIDE that modal. Pressing the footer Confirm just reopens it.
+  const gotIt = page.getByRole('button', { name: /got it/i })
+  if (await gotIt.isVisible().catch(() => false)) {
+    const box = page.locator('input[type="checkbox"]').first()
+    if (await box.isVisible().catch(() => false)) await box.check().catch(() => {})
+
+    await gotIt.click().catch(() => {})
+    await page.waitForTimeout(1000).catch(() => {})
+    return true
+  }
+
+  const acknowledge = page
+    .locator('[data-testid="alert-modal-acknowledge-checkbox"], input[type="checkbox"]')
+    .first()
+
+  if (await acknowledge.isVisible().catch(() => false)) {
+    await acknowledge.check().catch(() => {})
+    await page.waitForTimeout(500).catch(() => {})
+
+    const submit = page.locator('[data-testid="confirm-alert-modal-submit-button"]')
+    if (await submit.isVisible().catch(() => false)) {
+      await submit.click().catch(() => {})
+    } else {
+      // Fall back to the Confirm rendered inside the alert (the modal is
+      // portalled last, so it's the final match — not the footer button).
+      await page
+        .getByRole('button', { name: /^confirm$/i })
+        .last()
+        .click()
+        .catch(() => {})
+    }
+    await page.waitForTimeout(1500).catch(() => {})
+    return true
+  }
+
+  return false
+}
+
+/**
  * If MetaMask is showing its lock screen, unlock it.
  *
  * The extension can re-lock between the fixture unlocking it and the dApp
@@ -217,6 +277,10 @@ async function resolveRequest(
   for (let step = 0; step < 6; step++) {
     if (page.isClosed()) return // MetaMask closed it: the flow is complete
 
+    // Blockaid's false-positive "Malicious address" alert hijacks the footer
+    // button ("Review alert") and blocks confirmation until acknowledged.
+    await dismissSecurityAlert(page)
+
     const appeared = await button
       .waitFor({ state: 'visible', timeout: step === 0 ? 15_000 : 10_000 })
       .then(() => true)
@@ -316,9 +380,12 @@ export async function approveFollowUpRequests(
 
   for (let i = 0; i < max; i++) {
     try {
-      // Short budget: this is a "is there another one?" probe, not a wait for a
-      // request we know is coming.
-      await resolveRequest(context, extensionId, 'confirm', 45_000)
+      // Deliberately short. This is a "is there ANOTHER one?" probe, not a wait
+      // for a request we know is coming — and by now MetaMask's popup is already
+      // booted, so a genuine follow-up shows up quickly. A long budget here just
+      // burns ~45s of dead time on every single action, which is what pushed the
+      // lending tests over their timeout.
+      await resolveRequest(context, extensionId, 'confirm', 20_000)
       approved++
     } catch {
       break // nothing left pending

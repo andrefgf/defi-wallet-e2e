@@ -7,6 +7,7 @@
   "scripts": {
     "wallet:address": "tsx scripts/wallet-address.ts",
     "wallet:balance": "tsx scripts/check-balance.ts",
+    "mint:tokens": "tsx scripts/mint-test-tokens.ts",
     "fetch:metamask": "bash scripts/fetch-metamask.sh",
     "build:cache": "pnpm run fetch:metamask && tsx scripts/build-cache.ts",
     "build:cache:headless": "pnpm run fetch:metamask && cross-env HEADLESS=true tsx scripts/build-cache.ts",

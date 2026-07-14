@@ -7,7 +7,7 @@
 # Synpress's own downloadFile/unzipArchive both no-op when the files exist.
 set -euo pipefail
 
-VERSION="${METAMASK_VERSION:-13.13.1}"
+VERSION="${METAMASK_VERSION:-13.39.1}"
 CACHE_DIR="$(cd "$(dirname "$0")/.." && pwd)/.cache-synpress"
 ZIP="$CACHE_DIR/metamask-chrome-$VERSION.zip"
 DIR="$CACHE_DIR/metamask-chrome-$VERSION"
