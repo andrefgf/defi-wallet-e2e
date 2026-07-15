@@ -1,0 +1,71 @@
+import { defineConfig, devices } from '@playwright/test'
+import 'dotenv/config'
+
+/**
+ * Playwright configuration for the Synpress + MetaMask E2E suite.
+ *
+ * `baseURL` comes from DAPP_URL so specs can `page.goto('/')` and stay
+ * dApp-agnostic. Synpress launches a persistent Chromium context with the
+ * MetaMask extension via the `metaMaskFixtures` fixture, so we don't declare
+ * browser projects here beyond Chromium.
+ *
+ * @see https://docs.synpress.io
+ * @see https://playwright.dev/docs/test-configuration
+ */
+export default defineConfig({
+  testDir: './tests',
+  // These specs drive a real MetaMask against a live dApp, and MetaMask is
+  // punishingly slow headless — its popup takes ~30s to boot for EACH
+  // interaction. A full lending flow is five of them (connect, add network,
+  // switch, ERC-20 approve, then the action itself), so ten minutes is not
+  // padding, it's the real cost. A tight timeout here just fails tests that are
+  // working, only slowly. The bounded action/navigation timeouts below are what
+  // catch a genuine hang.
+  timeout: 600_000,
+  expect: { timeout: 30_000 },
+
+  fullyParallel: true,
+  forbidOnly: !!process.env.CI,
+  // Retry in CI only. Just one: these tests are slow (minutes each), and three
+  // attempts apiece overran the job's time limit and got the whole run cancelled.
+  retries: process.env.CI ? 1 : 0,
+  // Synpress caches one wallet browser and supports parallel workers, but
+  // shared on-chain state (a single test wallet) means serial is safer.
+  workers: 1,
+
+  reporter: process.env.CI
+    ? [['github'], ['html', { open: 'never' }], ['list']]
+    : [['html', { open: 'never' }], ['list']],
+
+  use: {
+    // Aave's only live testnet market is Base Sepolia; testnet mode itself is a
+    // localStorage flag set by the fixture (see fixtures/metamask.ts).
+    baseURL: process.env.DAPP_URL ?? 'https://app.aave.com/?marketName=proto_base_sepolia_v3',
+
+    // Always on, not just on failure. These specs ARE the deliverable: a record
+    // of a real wallet driving a real DeFi protocol. The trace carries a DOM
+    // snapshot for every action, so `pnpm run report` lets you scrub the whole
+    // user journey — connect, sign, supply, borrow — step by step.
+    trace: 'on',
+    screenshot: 'on',
+
+    // `video` is deliberately NOT set here: it has no effect on the persistent
+    // context our fixture builds (see fixtures/metamask.ts). Video is opt-in via
+    // `pnpm run test:demo` — it films every MetaMask popup too and more than
+    // doubles the runtime, which is a bad trade on every CI run.
+
+    actionTimeout: 30_000,
+    // Bound navigation explicitly — Playwright's default is NO limit, and a
+    // `goto`/`reload` on a MetaMask page with nothing to render never fires
+    // `load`, which silently ate the whole test budget. 60s rather than 30s:
+    // Aave is a heavy SPA on a testnet RPC and genuinely takes its time.
+    navigationTimeout: 60_000,
+  },
+
+  projects: [
+    {
+      name: 'chromium',
+      use: { ...devices['Desktop Chrome'] },
+    },
+  ],
+})

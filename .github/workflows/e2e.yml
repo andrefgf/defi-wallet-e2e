@@ -1,0 +1,118 @@
+name: E2E
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# Wallet flows drive real Sepolia state with a single shared test wallet —
+# never run two of these at once.
+concurrency:
+  group: e2e-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  e2e:
+    runs-on: ubuntu-latest
+    # The full suite drives a real wallet against a live protocol: MetaMask's
+    # popup needs ~30s to boot for EACH interaction, and a single supply is two
+    # on-chain transactions. ~40 min is the honest cost of not mocking.
+    timeout-minutes: 90
+    env:
+      # Chromium extensions need a display server even with --headless=new, so
+      # the browser steps run under xvfb.
+      HEADLESS: "true"
+      # Secrets come from GitHub repository secrets — never the repo.
+      # Only these two are needed: the wallet is imported from the seed, and the
+      # dApp drives any network switching itself.
+      SEED_PHRASE: ${{ secrets.SEED_PHRASE }}
+      WALLET_PASSWORD: ${{ secrets.WALLET_PASSWORD }}
+      # Aave's only live testnet market (Ethereum Sepolia has been retired).
+      DAPP_URL: https://app.aave.com/?marketName=proto_base_sepolia_v3
+
+    steps:
+      - uses: actions/checkout@v4
+
+      # Fail immediately with a clear message rather than 3 minutes later with
+      # a confusing "SEED_PHRASE is not set" from deep inside the cache builder.
+      - name: Check required secrets are configured
+        run: |
+          missing=0
+          for name in SEED_PHRASE WALLET_PASSWORD; do
+            if [ -z "${!name}" ]; then
+              echo "::error::Repository secret $name is not set."
+              missing=1
+            fi
+          done
+          if [ "$missing" = "1" ]; then
+            echo "Add them under Settings → Secrets and variables → Actions."
+            echo "Use a THROWAWAY wallet only — see README → Security notes."
+            exit 1
+          fi
+          echo "Required secrets are present."
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      # Cache the Synpress-downloaded MetaMask build + the built wallet cache.
+      # Keyed on the wallet-setup files so a setup change rebuilds the cache.
+      # Caches the downloaded/extracted MetaMask build. The wallet profile itself
+      # is rebuilt each run (it's keyed to the seed, which lives in secrets).
+      - name: Cache MetaMask build
+        uses: actions/cache@v4
+        with:
+          path: .cache-synpress/metamask-chrome-*
+          key: metamask-${{ runner.os }}-${{ hashFiles('scripts/fetch-metamask.sh') }}
+          restore-keys: |
+            metamask-${{ runner.os }}-
+
+      - name: Cache Playwright browsers
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml') }}
+          restore-keys: |
+            playwright-${{ runner.os }}-
+
+      - name: Install Playwright Chromium + system deps
+        run: pnpm exec playwright install --with-deps chromium
+
+      - name: Type-check
+        run: pnpm run typecheck
+
+      # Uses our own builder (scripts/build-cache.ts), not `synpress wallet-setup`
+      # — see README → "Working around Synpress". It self-verifies that the
+      # wallet actually persisted, so a bad cache fails here rather than as 14
+      # confusing test failures.
+      - name: Build wallet cache (headless)
+        run: xvfb-run --auto-servernum pnpm run build:cache:headless
+
+      # The lending suite spends real (testnet) gas and needs test tokens. Fail
+      # here with an actionable message rather than 20 minutes later, deep inside
+      # a wallet flow, with something cryptic.
+      - name: Preflight — wallet is funded
+        run: pnpm run preflight
+
+      # The FULL suite: connection, the lending lifecycle, and the edge cases.
+      # Every transaction is really signed in MetaMask and really settles
+      # on-chain.
+      - name: Run E2E tests (headless)
+        run: xvfb-run --auto-servernum pnpm test
+
+      - name: Upload Playwright report
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report
+          path: playwright-report/
+          retention-days: 14

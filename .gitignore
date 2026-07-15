@@ -1,0 +1,30 @@
+# Dependencies
+node_modules/
+
+# Secrets — NEVER commit these
+.env
+.env.local
+*.pem
+*.key
+
+# Wallet cache + downloaded MetaMask build (rebuild locally / in CI).
+# No trailing slash: under WSL this is often a symlink to a Linux-native dir
+# (a `dir/` pattern would not match a symlink, and it would get committed).
+.cache-synpress
+downloads/
+
+# Playwright artifacts
+test-results/
+playwright-report/
+blob-report/
+playwright/.cache/
+
+# Logs / OS / editor
+*.log
+npm-debug.log*
+pnpm-debug.log*
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/*
+!.vscode/extensions.json
