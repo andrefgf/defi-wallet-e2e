@@ -1,13 +1,22 @@
-# Web3 dApp E2E Wallet Testing Suite
+<h1 align="center">defi-wallet-e2e</h1>
 
-> End-to-end tests that drive a **real MetaMask** against a **live DeFi protocol** — wallet connection, the full lending lifecycle, and the failure modes that matter — in **TypeScript + Playwright**, running **headless in CI**.
->
+<p align="center">
+  <b>End-to-end tests that drive a real MetaMask against live Aave v3</b><br/>
+  Wallet connection · the full lending lifecycle · the failure modes that matter<br/>
+  <sub>TypeScript + Playwright · every transaction really signed, really settled on-chain · green in CI</sub>
+</p>
+
+<p align="center">
+  <a href="https://github.com/andrefgf/defi-wallet-e2e/actions/workflows/e2e.yml"><img alt="E2E" src="https://github.com/andrefgf/defi-wallet-e2e/actions/workflows/e2e.yml/badge.svg"></a>
+  <img alt="Tests" src="https://img.shields.io/badge/tests-10%20passing-2EAD33">
+  <img alt="Playwright" src="https://img.shields.io/badge/Playwright-2EAD33?logo=playwright&logoColor=white">
+  <img alt="TypeScript" src="https://img.shields.io/badge/TypeScript-3178C6?logo=typescript&logoColor=white">
+  <img alt="MetaMask" src="https://img.shields.io/badge/MetaMask-F6851B?logo=metamask&logoColor=white">
+  <img alt="Aave v3" src="https://img.shields.io/badge/Aave-v3-B6509E?logo=aave&logoColor=white">
+  <img alt="License" src="https://img.shields.io/badge/license-MIT-blue">
+</p>
+
 > **Target:** Aave v3 on **Base Sepolia** (Aave's only remaining testnet market).
-
-[![E2E](https://github.com/andrefgf/crispy-guide/actions/workflows/e2e.yml/badge.svg)](https://github.com/andrefgf/crispy-guide/actions/workflows/e2e.yml)
-![Playwright](https://img.shields.io/badge/Playwright-2EAD33?logo=playwright&logoColor=white)
-![TypeScript](https://img.shields.io/badge/TypeScript-3178C6?logo=typescript&logoColor=white)
-![MetaMask](https://img.shields.io/badge/MetaMask-F6851B?logo=metamask&logoColor=white)
 
 ---
 
@@ -165,7 +174,7 @@ source ~/.nvm/nvm.sh && nvm install 20 && corepack enable && corepack prepare pn
 
 sudo apt-get update && sudo apt-get install -y libnss3 libnspr4 libasound2t64
 
-cd /mnt/c/path/to/crispy-guide
+cd /mnt/c/path/to/defi-wallet-e2e
 pnpm install                  # from INSIDE WSL: a Windows node_modules carries
 pnpm exec playwright install chromium   # win32 binaries Linux can't execute
 ```

@@ -1,9 +1,22 @@
 {
-  "name": "crispy-guide",
-  "version": "0.1.0",
+  "name": "defi-wallet-e2e",
+  "version": "1.0.0",
   "private": true,
-  "description": "Automated end-to-end tests for a DeFi dApp (Aave v3 on Sepolia) covering wallet connection, on-chain transactions, and failure modes, using Playwright + Synpress + MetaMask.",
+  "description": "End-to-end tests that drive a real MetaMask against live Aave v3 on Base Sepolia — wallet connection, the full lending lifecycle, and failure modes. Playwright + TypeScript.",
   "type": "module",
+  "author": "André Guerra <https://www.linkedin.com/in/andrefgfrancisco>",
+  "license": "MIT",
+  "homepage": "https://github.com/andrefgf/defi-wallet-e2e#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/andrefgf/defi-wallet-e2e.git"
+  },
+  "bugs": {
+    "url": "https://github.com/andrefgf/defi-wallet-e2e/issues"
+  },
+  "engines": {
+    "node": ">=18"
+  },
   "scripts": {
     "wallet:address": "tsx scripts/wallet-address.ts",
     "wallet:balance": "tsx scripts/check-balance.ts",
@@ -22,17 +35,24 @@
     "typecheck": "tsc --noEmit"
   },
   "keywords": [
+    "e2e",
+    "e2e-testing",
+    "end-to-end-testing",
     "playwright",
     "synpress",
     "metamask",
+    "wallet",
     "web3",
-    "e2e",
     "defi",
     "aave",
-    "qa"
+    "ethereum",
+    "base-sepolia",
+    "dapp",
+    "qa",
+    "qa-automation",
+    "test-automation",
+    "typescript"
   ],
-  "author": "André Guerra",
-  "license": "MIT",
   "devDependencies": {
     "@playwright/test": "1.48.2",
     "@synthetixio/synpress": "^4.1.2",
