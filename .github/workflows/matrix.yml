@@ -90,12 +90,16 @@ jobs:
           cat matrix-out/results.txt >> "$GITHUB_STEP_SUMMARY" 2>/dev/null || echo "(no MATRIX lines captured)" >> "$GITHUB_STEP_SUMMARY"
           echo '```' >> "$GITHUB_STEP_SUMMARY"
 
-      - name: Upload matrix results + logs + debug shots
+      - name: Upload matrix results + logs + screenshots
         if: ${{ !cancelled() }}
         uses: actions/upload-artifact@v4
         with:
           name: matrix-results
+          # test-results/ holds per-cell failure screenshots (trace is off, so
+          # it stays small); playwright-report/ has the captured post-reload
+          # shots. Both are how we tell a real `fail` from a slow reload.
           path: |
             matrix-out/
-            test-results/matrix-debug/
+            test-results/
+            playwright-report/
           retention-days: 30
