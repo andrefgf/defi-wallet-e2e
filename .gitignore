@@ -19,6 +19,9 @@ playwright-report/
 blob-report/
 playwright/.cache/
 
+# Matrix runner CI output (results + logs, produced by .github/workflows/matrix.yml)
+matrix-out/
+
 # Logs / OS / editor
 *.log
 npm-debug.log*
