@@ -219,9 +219,9 @@ async function dismissSecurityAlert(page: Page): Promise<boolean> {
  * instead of the confirmation — and we'd wait forever for a button that is
  * never going to appear.
  */
-async function unlockIfLocked(page: Page): Promise<void> {
+async function unlockIfLocked(page: Page): Promise<boolean> {
   const password = page.getByTestId('unlock-password')
-  if (!(await password.isVisible().catch(() => false))) return
+  if (!(await password.isVisible().catch(() => false))) return false
 
   const secret = process.env.WALLET_PASSWORD
   if (!secret) throw new Error('MetaMask is locked but WALLET_PASSWORD is not set.')
@@ -229,6 +229,7 @@ async function unlockIfLocked(page: Page): Promise<void> {
   await password.fill(secret)
   await page.getByTestId('unlock-submit').click().catch(() => {})
   await password.waitFor({ state: 'hidden', timeout: 20_000 }).catch(() => {})
+  return true // caller must re-route: after unlock MetaMask lands on Home, not the pending request
 }
 
 /**
@@ -265,8 +266,12 @@ export async function getNotificationPage(
     const requestDeadline = Date.now() + 30_000
     while (Date.now() < requestDeadline && !rendered.isClosed()) {
       if (await showsRequest(rendered)) return rendered
-      // The popup can present the lock screen instead of the request.
-      await unlockIfLocked(rendered)
+      // The popup can present the lock screen instead of the request. After
+      // unlocking, reload so it routes to the pending approval (see the headless
+      // branch below for the full reasoning).
+      if (await unlockIfLocked(rendered)) {
+        await rendered.reload({ waitUntil: 'domcontentloaded', timeout: 15_000 }).catch(() => {})
+      }
       await rendered.waitForTimeout(500).catch(() => {})
     }
     // Popup never showed a request. Do NOT close it (closing = user rejects);
@@ -296,9 +301,20 @@ export async function getNotificationPage(
   while (Date.now() < deadline) {
     if (await showsRequest(page)) return page
 
-    // MetaMask can present its lock screen here instead of the request. Unlock
-    // in place rather than waiting for a confirm button that will never come.
-    await unlockIfLocked(page)
+    // MetaMask can present its lock screen here instead of the request — this
+    // happens mid-suite when headless MV3 kills the idle service worker and it
+    // restarts LOCKED. Unlock in place. CRUCIALLY, after unlocking MetaMask
+    // lands on the account Home, NOT the pending request, so a reload is needed
+    // to route notification.html back to the queued approval — otherwise the
+    // confirm button never appears and the dApp spins forever (the exact
+    // "Borrowing USDT" hang we saw). Reload immediately after a successful
+    // unlock rather than waiting out the blank-shell timer.
+    if (await unlockIfLocked(page)) {
+      await page
+        .reload({ waitUntil: 'domcontentloaded', timeout: 15_000 })
+        .catch(() => {})
+      lastReload = Date.now()
+    }
 
     await page.waitForTimeout(1000)
 
