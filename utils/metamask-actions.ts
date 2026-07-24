@@ -1,4 +1,48 @@
 import type { BrowserContext, Page } from '@playwright/test'
+import fs from 'node:fs'
+
+/**
+ * Diagnostics for the confirm/cancel loop, gated on MATRIX_DEBUG so normal runs
+ * stay silent. Dumps every visible button (with enabled state) and data-testid,
+ * plus a screenshot, so a stuck "confirm" step shows exactly what MetaMask is
+ * rendering — a disabled button, a checkbox gate, the wrong screen, etc.
+ *
+ *   $env:MATRIX_DEBUG=1; pnpm test tests/matrix/aave.metamask.spec.ts -g connect
+ *
+ * Screenshots land in test-results/matrix-debug/.
+ */
+const MM_DEBUG = !!process.env.MATRIX_DEBUG
+let mmDebugSeq = 0
+async function mmDump(page: Page, label: string): Promise<void> {
+  if (MM_DEBUG !== true || page.isClosed()) return
+  // Screenshot FIRST — it's the most useful artifact and, unlike page.$$eval,
+  // it survives MetaMask's LavaMoat scuttling (which blocks in-page evaluation
+  // of globals like MutationObserver). The DOM dump is best-effort after it.
+  const dir = 'test-results/matrix-debug'
+  try {
+    fs.mkdirSync(dir, { recursive: true })
+    await page
+      .screenshot({ path: `${dir}/${String(mmDebugSeq++).padStart(2, '0')}-${label.replace(/\W+/g, '_')}.png` })
+      .catch(() => {})
+  } catch {
+    // ignore — never let diagnostics fail the run
+  }
+  // Locator-based reads instead of $$eval: these run through Playwright's own
+  // protocol and are not blocked by LavaMoat the way page-context eval is.
+  try {
+    const labels: string[] = []
+    const btns = page.locator('button:visible')
+    const n = Math.min(await btns.count().catch(() => 0), 12)
+    for (let i = 0; i < n; i++) {
+      const t = (await btns.nth(i).innerText().catch(() => '')).trim().slice(0, 24)
+      const en = await btns.nth(i).isEnabled().catch(() => false)
+      if (t) labels.push(`"${t}"${en ? '' : '(DISABLED)'}`)
+    }
+    console.log(`[MM ${label}] page=${page.url().split('/').pop()} buttons: ${labels.join(' | ') || '(none)'}`)
+  } catch {
+    /* diagnostics only */
+  }
+}
 
 /**
  * MetaMask notification-popup actions, written against the selectors MetaMask
@@ -53,18 +97,36 @@ function notificationUrl(extensionId: string): string {
 
 /**
  * MetaMask frequently paints a blank document on first load (reliably so in
- * headless), which makes every locator silently match nothing. Reload until the
- * app actually renders.
+ * headless), which makes every locator silently match nothing. Wait for the app
+ * to render — patiently.
+ *
+ * PATIENT-FIRST, RELOAD-LAST (changed 2026-07-22). The old version reloaded on
+ * every ~500ms attempt. That contradicts the boot rule documented further down
+ * for the headless path: reloading MetaMask WHILE it boots restarts the boot.
+ * On a fast machine MetaMask won the race anyway, so CI (headless, which never
+ * runs this code path) stayed green — but on a slow machine (Defender scanning
+ * a fresh per-test profile copy) the reload loop held the popup blank forever:
+ * blank-page screenshot, dApp stuck on "Requesting Connection", test dead after
+ * 6.5 minutes. So: poll quietly, and reload only as a last resort, never more
+ * than once per 15s.
  *
  * Every navigation here is explicitly bounded. `page.reload()` with no timeout
  * hangs indefinitely on this page when MetaMask has nothing to show — which ate
  * the entire test budget and looked like a mysterious timeout.
  */
-async function waitUntilRendered(page: Page, attempts = 6): Promise<Page> {
-  for (let attempt = 0; attempt < attempts; attempt++) {
-    await page.waitForTimeout(500)
-    if ((await page.locator('[data-testid]').count()) > 0) return page
-    await page.reload({ timeout: 5_000 }).catch(() => {})
+async function waitUntilRendered(page: Page, totalMs = 60_000): Promise<Page> {
+  const deadline = Date.now() + totalMs
+  let lastReload = Date.now() // treat launch as a reload: give boot a full window first
+
+  while (Date.now() < deadline) {
+    if ((await page.locator('[data-testid]').count().catch(() => 0)) > 0) return page
+    if (page.isClosed()) return page
+    await page.waitForTimeout(1_000).catch(() => {})
+
+    if (Date.now() - lastReload > 15_000) {
+      await page.reload({ timeout: 5_000 }).catch(() => {})
+      lastReload = Date.now()
+    }
   }
   return page
 }
@@ -157,9 +219,9 @@ async function dismissSecurityAlert(page: Page): Promise<boolean> {
  * instead of the confirmation — and we'd wait forever for a button that is
  * never going to appear.
  */
-async function unlockIfLocked(page: Page): Promise<void> {
+async function unlockIfLocked(page: Page): Promise<boolean> {
   const password = page.getByTestId('unlock-password')
-  if (!(await password.isVisible().catch(() => false))) return
+  if (!(await password.isVisible().catch(() => false))) return false
 
   const secret = process.env.WALLET_PASSWORD
   if (!secret) throw new Error('MetaMask is locked but WALLET_PASSWORD is not set.')
@@ -167,6 +229,7 @@ async function unlockIfLocked(page: Page): Promise<void> {
   await password.fill(secret)
   await page.getByTestId('unlock-submit').click().catch(() => {})
   await password.waitFor({ state: 'hidden', timeout: 20_000 }).catch(() => {})
+  return true // caller must re-route: after unlock MetaMask lands on Home, not the pending request
 }
 
 /**
@@ -186,15 +249,33 @@ export async function getNotificationPage(
   // Give MetaMask a beat to register the request the dApp just fired.
   await new Promise((resolve) => setTimeout(resolve, 2000))
 
-  // Headed: MetaMask opens the popup window itself.
+  // Headed: MetaMask opens the popup window itself. Scan briefly for the
+  // window — but once it EXISTS, commit to it patiently instead of racing it.
+  // The old code gave a found-but-still-booting popup only one aggressive
+  // render attempt inside a 5s window, then fell through and opened a SECOND
+  // notification.html next to it. Two racing notification UIs on a slow
+  // machine is how "Requesting Connection" hangs forever.
   const popupDeadline = Date.now() + 5000
-  while (Date.now() < popupDeadline) {
-    const popup = context.pages().find((p) => p.url().startsWith(url))
-    if (popup) {
-      const rendered = await waitUntilRendered(popup)
+  let popup: Page | undefined
+  while (Date.now() < popupDeadline && !popup) {
+    popup = context.pages().find((p) => p.url().startsWith(url))
+    if (!popup) await new Promise((resolve) => setTimeout(resolve, 250))
+  }
+  if (popup) {
+    const rendered = await waitUntilRendered(popup, 60_000)
+    const requestDeadline = Date.now() + 30_000
+    while (Date.now() < requestDeadline && !rendered.isClosed()) {
       if (await showsRequest(rendered)) return rendered
+      // The popup can present the lock screen instead of the request. After
+      // unlocking, reload so it routes to the pending approval (see the headless
+      // branch below for the full reasoning).
+      if (await unlockIfLocked(rendered)) {
+        await rendered.reload({ waitUntil: 'domcontentloaded', timeout: 15_000 }).catch(() => {})
+      }
+      await rendered.waitForTimeout(500).catch(() => {})
     }
-    await new Promise((resolve) => setTimeout(resolve, 250))
+    // Popup never showed a request. Do NOT close it (closing = user rejects);
+    // fall through to opening notification.html ourselves, as before.
   }
 
   // Headless: no popup window is ever created, so open the page ourselves.
@@ -220,9 +301,20 @@ export async function getNotificationPage(
   while (Date.now() < deadline) {
     if (await showsRequest(page)) return page
 
-    // MetaMask can present its lock screen here instead of the request. Unlock
-    // in place rather than waiting for a confirm button that will never come.
-    await unlockIfLocked(page)
+    // MetaMask can present its lock screen here instead of the request — this
+    // happens mid-suite when headless MV3 kills the idle service worker and it
+    // restarts LOCKED. Unlock in place. CRUCIALLY, after unlocking MetaMask
+    // lands on the account Home, NOT the pending request, so a reload is needed
+    // to route notification.html back to the queued approval — otherwise the
+    // confirm button never appears and the dApp spins forever (the exact
+    // "Borrowing USDT" hang we saw). Reload immediately after a successful
+    // unlock rather than waiting out the blank-shell timer.
+    if (await unlockIfLocked(page)) {
+      await page
+        .reload({ waitUntil: 'domcontentloaded', timeout: 15_000 })
+        .catch(() => {})
+      lastReload = Date.now()
+    }
 
     await page.waitForTimeout(1000)
 
@@ -281,6 +373,8 @@ async function resolveRequest(
     // button ("Review alert") and blocks confirmation until acknowledged.
     await dismissSecurityAlert(page)
 
+    await mmDump(page, `${kind}-step${step}-before`)
+
     const appeared = await button
       .waitFor({ state: 'visible', timeout: step === 0 ? 15_000 : 10_000 })
       .then(() => true)
@@ -298,10 +392,40 @@ async function resolveRequest(
       continue
     }
 
+    const enabled = await button.isEnabled().catch(() => false)
+    if (MM_DEBUG === true) console.log(`[MM ${kind}-step${step}] testid button enabled=${enabled}`)
+
+    // 1. Click the testid button (confirm-btn / confirm-footer-button).
     await button.click({ timeout: 10_000 }).catch(() => {})
+    await page.waitForTimeout(1500).catch(() => {})
+
+    // 2. Version-drift fallback (confirm side only). MetaMask re-tags its footer
+    //    button across releases: on 13.39.1 the connect screen shows a plain
+    //    "Connect" that the 13.13.1-era testids can miss, so the testid click
+    //    above lands on a stale/hidden node and the request never advances —
+    //    the "clicked 6×, still pending" symptom. If a request is STILL showing,
+    //    click the visible button by its label instead. The cancel path already
+    //    works and stays a single deliberate act, so it's deliberately excluded.
+    if (kind === 'confirm' && !page.isClosed() && (await showsRequest(page))) {
+      for (const name of [/^connect$/i, /^confirm$/i, /^approve$/i, /^sign$/i, /^next$/i]) {
+        const labelled = page.getByRole('button', { name }).last()
+        if (
+          (await labelled.isVisible().catch(() => false)) &&
+          (await labelled.isEnabled().catch(() => false))
+        ) {
+          if (MM_DEBUG === true) console.log(`[MM ${kind}-step${step}] fallback click by label ${name}`)
+          await labelled.click({ timeout: 5_000 }).catch(() => {})
+          await page.waitForTimeout(1500).catch(() => {})
+          break
+        }
+      }
+    }
+
     // Give MetaMask a moment to either close the popup or render the next step
     // (which may well use the OTHER button family — hence re-resolving above).
-    await page.waitForTimeout(3000).catch(() => {})
+    await page.waitForTimeout(1500).catch(() => {})
+
+    await mmDump(page, `${kind}-step${step}-after-click`)
 
     // After the first click we always want the "confirm" family: a rejection is
     // a single act, but the screens that FOLLOW an approval must be approved
@@ -316,6 +440,8 @@ async function resolveRequest(
   }
 
   if (page.isClosed()) return
+
+  await mmDump(page, `${kind}-GAVE-UP`)
 
   throw new Error(
     `MetaMask did not act on "${kind}" — a request is still pending after 6 steps.`,
@@ -375,17 +501,26 @@ export async function approveFollowUpRequests(
   context: BrowserContext,
   extensionId: string,
   max = 3,
+  firstTimeoutMs = 20_000,
 ): Promise<number> {
   let approved = 0
 
   for (let i = 0; i < max; i++) {
     try {
-      // Deliberately short. This is a "is there ANOTHER one?" probe, not a wait
-      // for a request we know is coming — and by now MetaMask's popup is already
-      // booted, so a genuine follow-up shows up quickly. A long budget here just
-      // burns ~45s of dead time on every single action, which is what pushed the
-      // lending tests over their timeout.
-      await resolveRequest(context, extensionId, 'confirm', 20_000)
+      // The FIRST attempt may be a request we KNOW is coming (a transaction the
+      // caller just triggered). Under headless MV3, Chrome can kill MetaMask's
+      // idle service worker mid-suite and it restarts LOCKED — so that first
+      // confirmation may need to boot the notification UI (~30s), unlock, and
+      // re-render before the confirm button appears. Callers submitting a real
+      // transaction pass a generous `firstTimeoutMs` for exactly this. This is
+      // why the lending `borrow` (deep into a 40-min run) timed out while
+      // `supply` (early, wallet still warm) passed.
+      //
+      // LATER attempts are just "is there ANOTHER one?" probes — kept short, so
+      // an action with no follow-up doesn't burn dead time (which is what pushed
+      // the lending tests over their timeout in the first place).
+      const budget = i === 0 ? firstTimeoutMs : 20_000
+      await resolveRequest(context, extensionId, 'confirm', budget)
       approved++
     } catch {
       break // nothing left pending
@@ -421,7 +556,7 @@ export async function hasPendingRequest(
   const page = await context.newPage()
   try {
     await page.goto(url)
-    await waitUntilRendered(page, 3)
+    await waitUntilRendered(page, 10_000)
     return await showsRequest(page)
   } finally {
     await page.close().catch(() => {})

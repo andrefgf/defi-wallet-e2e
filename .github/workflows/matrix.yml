@@ -1,0 +1,105 @@
+name: Matrix
+
+# Runs the wallet-compatibility matrix flows in CI, where there's enough memory
+# to actually drive a real wallet — a laptop OOMs on headed Chromium + MetaMask
+# + Aave. Cell results are extracted from the run and uploaded as an artifact
+# (and shown in the run summary) to transcribe into the matrix site.
+#
+# Trigger manually (Actions → Matrix → Run workflow) or on pushes to the branch.
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [matrix-runner]
+
+# Shares one test wallet with the e2e job — never run them concurrently.
+concurrency:
+  group: wallet-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  matrix:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      HEADLESS: "true"
+      SEED_PHRASE: ${{ secrets.SEED_PHRASE }}
+      WALLET_PASSWORD: ${{ secrets.WALLET_PASSWORD }}
+      DAPP_URL: https://app.aave.com/?marketName=proto_base_sepolia_v3
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check required secrets are configured
+        run: |
+          missing=0
+          for name in SEED_PHRASE WALLET_PASSWORD; do
+            if [ -z "${!name}" ]; then
+              echo "::error::Repository secret $name is not set."
+              missing=1
+            fi
+          done
+          if [ "$missing" = "1" ]; then
+            echo "Add them under Settings → Secrets and variables → Actions (throwaway wallet only)."
+            exit 1
+          fi
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Cache MetaMask build
+        uses: actions/cache@v4
+        with:
+          path: .cache-synpress/metamask-chrome-*
+          key: metamask-${{ runner.os }}-${{ hashFiles('scripts/fetch-metamask.mjs') }}
+          restore-keys: metamask-${{ runner.os }}-
+
+      - name: Cache Playwright browsers
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml') }}
+          restore-keys: playwright-${{ runner.os }}-
+
+      - name: Install Playwright Chromium + system deps
+        run: pnpm exec playwright install --with-deps chromium
+
+      - name: Build wallet cache (headless)
+        run: xvfb-run --auto-servernum pnpm run build:cache:headless
+
+      # A failing CELL is a valid data point, not a broken build — so this step
+      # must never fail the job. We capture every `MATRIX:` line the spec prints
+      # and surface it as the real output.
+      - name: Run matrix flows
+        run: |
+          mkdir -p matrix-out
+          xvfb-run --auto-servernum pnpm exec playwright test tests/matrix --trace off 2>&1 \
+            | tee matrix-out/run.log || true
+          grep -E '^MATRIX:' matrix-out/run.log | sort -u > matrix-out/results.txt || true
+          echo "## Matrix results" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          cat matrix-out/results.txt >> "$GITHUB_STEP_SUMMARY" 2>/dev/null || echo "(no MATRIX lines captured)" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Upload matrix results + logs + screenshots
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: matrix-results
+          # test-results/ holds per-cell failure screenshots (trace is off, so
+          # it stays small); playwright-report/ has the captured post-reload
+          # shots. Both are how we tell a real `fail` from a slow reload.
+          path: |
+            matrix-out/
+            test-results/
+            playwright-report/
+          retention-days: 30

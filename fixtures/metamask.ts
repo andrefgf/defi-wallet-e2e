@@ -68,6 +68,11 @@ export const test = base.extend<MetaMaskFixtures>({
 
     const context = await chromium.launchPersistentContext(profile, {
       headless: false, // headlessness is driven by --headless=new in browserArgs()
+      // PW_CHANNEL=chrome uses the system-installed Chrome instead of
+      // Playwright's downloaded Chromium. Escape hatch for machines where
+      // `playwright install` wedges (Defender fighting the unzip). Unset =
+      // default Chromium, unchanged behaviour.
+      channel: process.env.PW_CHANNEL || undefined,
       args: browserArgs(),
       viewport: { width: 1280, height: 720 },
       recordVideo,

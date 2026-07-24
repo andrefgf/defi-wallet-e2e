@@ -28,6 +28,9 @@ import {
 async function launch(profile: string): Promise<{ context: BrowserContext; id: string }> {
   const context = await chromium.launchPersistentContext(profile, {
     headless: false, // headlessness comes from --headless=new in browserArgs()
+    // PW_CHANNEL=chrome → drive the system-installed Chrome instead of
+    // Playwright's Chromium (see fixtures/metamask.ts for why).
+    channel: process.env.PW_CHANNEL || undefined,
     args: browserArgs(),
   })
 
