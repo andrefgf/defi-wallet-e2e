@@ -101,24 +101,26 @@ test.describe('Matrix — Aave × MetaMask', () => {
       await page.reload({ waitUntil: 'domcontentloaded' })
       await dismissAnalyticsPrompt(page)
 
-      // Race the two determinate outcomes for up to 45s: the account chip
-      // returning (session restored) vs the "Connect wallet" CTA returning
-      // (session dropped — the Safe #8307 class). "Neither yet" is just slow and
-      // must NOT be recorded as a fail, so it becomes `blocked`.
-      const chip = connect.accountChip(page)
-      const cta = connect.connectWalletButton(page)
-      const deadline = Date.now() + 45_000
-      let outcome: 'restored' | 'dropped' | 'unknown' = 'unknown'
-      while (Date.now() < deadline) {
-        if (await chip.isVisible().catch(() => false)) {
-          outcome = 'restored'
-          break
-        }
-        if (await cta.isVisible().catch(() => false)) {
-          outcome = 'dropped'
-          break
-        }
-        await page.waitForTimeout(1000)
+      // The account chip is the DEFINITIVE "reconnected" signal. Aave (a wagmi
+      // dApp) shows the "Connect wallet" CTA transiently while wagmi rehydrates,
+      // then swaps in the chip — so catching the CTA first does NOT mean the
+      // session dropped, only that reconnect hasn't finished. Wait for the chip;
+      // conclude `dropped` only if it never returns while the CTA is present.
+      //
+      // Why this matters: two identical CI runs disagreed (restored vs dropped)
+      // because the old race broke on whichever of chip/CTA appeared first. The
+      // chip is the ground truth; the CTA is noise during rehydration.
+      const restored = await connect
+        .accountChip(page)
+        .isVisible({ timeout: 30_000 })
+        .catch(() => false)
+      let outcome: 'restored' | 'dropped' | 'unknown'
+      if (restored) {
+        outcome = 'restored'
+      } else if (await connect.connectWalletButton(page).isVisible().catch(() => false)) {
+        outcome = 'dropped'
+      } else {
+        outcome = 'unknown'
       }
 
       // Always record what the dApp showed after reload (into the HTML report).

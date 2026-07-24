@@ -21,6 +21,24 @@ Headless run: `reject` = pass again (consistent), `connect` = same "still pendin
 
 Instrumented `resolveRequest` in `utils/metamask-actions.ts` (gated on `MATRIX_DEBUG`, syntax-checked, does not change control flow): logs every visible button + enabled state + testids per step, whether the confirm button is `enabled`, and saves screenshots to `test-results/matrix-debug/`. Prime suspect: a disabled confirm button (new checkbox/scroll gate in 13.39.1) — the `enabled=` line will confirm or kill that instantly.
 
+### 2026-07-23 (two CI runs) — reconnect FLIPPED → my test had a race bug (fixed)
+
+Same commit, two runs, opposite reconnect verdicts:
+- e2e run: reconnect = pass (outcome=restored)
+- matrix run: reconnect = fail (outcome=dropped)
+
+That flakiness = a bug in MY test, not an Aave finding. Aave (wagmi) shows the Connect CTA transiently during rehydration, then swaps in the chip. The old 45s race broke on whichever appeared first → caught the transient CTA as "dropped" inconsistently. **Did NOT record reconnect** — a recorded fail would have been false.
+
+Fixed: reconnect now waits up to 30s for the chip (the definitive reconnected signal); `dropped` only if the chip never returns while the CTA is present. Re-run the Matrix workflow:
+- consistently `restored` → the old dropped was my bug; record reconnect = pass.
+- consistently `dropped` → real Aave session-drop; record fail (a finding).
+- still flipping → intermittent session drop IS the finding; record fail w/ note.
+
+Recorded so far (stable across runs): connect = pass, reject = pass.
+
+### borrow (e2e only) — separate, not the matrix
+lending-lifecycle borrow (USDT) times out at the modal success/fail wait, both attempts. supply (identical confirm machinery) passes, so it's not my shared-code change — it's a lending/testnet-domain issue. It's the only thing reddening e2e now (matrix cells are green-as-tests there). Investigate via its trace later; not a matrix blocker.
+
 ### 2026-07-23 (CI, funded wallet) — 9/13 green; only borrow + reconnect red
 
 Full e2e run with the CI wallet now FUNDED (gas 0.0129 ETH, USDC 19375). typecheck green. Passed: all connection (3), all edge-cases (3), supply, matrix connect + reject. So the shared metamask-actions changes are proven across the whole suite.
