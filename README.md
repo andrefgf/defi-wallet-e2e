@@ -8,7 +8,7 @@
 
 <p align="center">
   <a href="https://github.com/andrefgf/defi-wallet-e2e/actions/workflows/e2e.yml"><img alt="E2E" src="https://github.com/andrefgf/defi-wallet-e2e/actions/workflows/e2e.yml/badge.svg"></a>
-  <img alt="Tests" src="https://img.shields.io/badge/tests-10%20passing-2EAD33">
+  <img alt="Tests" src="https://img.shields.io/badge/tests-real%20wallet%2C%20no%20mocks-2EAD33">
   <img alt="Playwright" src="https://img.shields.io/badge/Playwright-2EAD33?logo=playwright&logoColor=white">
   <img alt="TypeScript" src="https://img.shields.io/badge/TypeScript-3178C6?logo=typescript&logoColor=white">
   <img alt="MetaMask" src="https://img.shields.io/badge/MetaMask-F6851B?logo=metamask&logoColor=white">
@@ -35,10 +35,12 @@ This one doesn't mock. Every transaction here is **really signed in a real MetaM
 | Suite | Tests | What it proves |
 |---|---|---|
 | **`connection.spec.ts`** | 3 | Cold connect, **reject** the connection, disconnect — plus the add-network / switch-network handshake, asserting the wallet lands on the right chain |
-| **`lending-lifecycle.spec.ts`** | 4 | **supply → borrow → repay → withdraw** against live Aave. Real transactions, verified against on-chain balances |
 | **`edge-cases.spec.ts`** | 3 | User **rejects** a transaction, an over-sized supply is **blocked before it reaches the wallet**, and a wrong-network state **disables actions** instead of letting them fail |
+| **`lending-lifecycle.spec.ts`** | 1 (+3 quarantined) | **supply** against live Aave — a real two-transaction ERC-20 flow (approve + supply), verified against on-chain balances. `borrow → repay → withdraw` are present but `test.fixme`'d — see [MV3 kills the wallet mid-run](#what-else-breaks-when-the-wallet-is-real) |
 
-The lending suite takes ~20 minutes: MetaMask's popup needs ~30s to boot for *each* interaction in headless, and a single supply is two on-chain transactions (ERC-20 approve, then the action). That's the honest cost of not mocking.
+A single supply is two on-chain transactions and MetaMask's popup needs ~30s to boot for *each* interaction in headless — that's the honest cost of not mocking.
+
+**Also in here — a wallet-compatibility matrix ([`tests/matrix/`](tests/matrix/)).** A separate, still-early harness that drives real wallets through `connect / sign / reconnect / reject` per dApp and records pass/fail with evidence, on its own CI workflow ([`matrix.yml`](.github/workflows/matrix.yml)). The verdict model is deliberately strict: a cell is only recorded once a result is stable across runs, so a flaky test never reports a false finding. See [`tests/matrix/STATUS.md`](tests/matrix/STATUS.md) for the build log.
 
 ### Assertions worth reading
 
@@ -96,6 +98,15 @@ MetaMask's Blockaid scanner has no reputation data for **testnet** contracts, so
 
 Unhandled, transactions never sign and the dApp waits forever. Handled in `metamask-actions.ts` — with a warning **not** to copy that pattern anywhere near mainnet, where the alert may well be telling the truth.
 
+### What else breaks when the wallet is real
+
+More failure modes surfaced building this out — none of them in the dApp, and every one of them **invisible to a mocked provider**. A stub has no extension to fail to load, no version to drift, no service worker to die.
+
+- **Chrome dropped `--load-extension` from stable.** Branded Chrome can no longer load an unpacked extension for automation — it silently ignores the flag, MetaMask never loads, and the wait for a service worker just times out. You need a Chromium (or Chrome-for-Testing) build.
+- **Version drift renames elements out from under you.** MetaMask changed the Connect button's `data-testid` between `13.13.1` and `13.39.1`. A suite that clicked the old id found *a* button, clicked it, and hung — looking exactly like a broken dApp. The fix is to fall back to matching the button by its visible label when the testid misses.
+- **MetaMask's own hardening blinds your tooling.** LavaMoat scuttles globals on MetaMask's pages, so in-page evaluation (e.g. reading the DOM to debug) throws — precisely where you most want visibility. Screenshots survive it; `page.$$eval` does not.
+- **Headless MV3 kills the wallet mid-run — and drops in-flight transactions.** On a long suite, Chrome terminates MetaMask's idle background service worker to reclaim memory. It restarts **locked**, and any transaction that was in flight is **gone** with the worker's memory. The dApp waits forever for a signature on a request that no longer exists. Re-unlocking and re-routing recovers a *locked* wallet; it cannot resurrect a *lost* request — which is why `borrow / repay / withdraw` (deep into a 40-minute run) are quarantined, while `supply` (early, worker still alive) passes. The real fix is keeping the worker alive across the run.
+
 ### Aave's selectors, for the record
 
 Its modal is a MUI `role="presentation"` — **never** `role="dialog"`, so every `getByRole('dialog')` locator silently matches nothing. The rest is `data-cy`, with traps:
@@ -115,7 +126,7 @@ All of it lives in [`utils/selectors.ts`](utils/selectors.ts). One file to fix w
 ## Running it
 
 ### Prerequisites
-- **Linux, macOS, or Windows via WSL2** — the Synpress CLI refuses to run on native Windows
+- **Linux, macOS, or native Windows.** Synpress's *own* CLI won't run on Windows, but this suite replaces it (`scripts/build-cache.ts`) and its MetaMask fetch is now cross-platform (`scripts/fetch-metamask.mjs`, no bash), so native Windows PowerShell works. WSL2 also works (see below).
 - Node.js 18+ and pnpm
 - A **dedicated, throwaway** wallet. Never one that holds real funds.
 - **Base Sepolia** ETH for gas (not Ethereum Sepolia — different chain)
@@ -199,7 +210,7 @@ WSL2 ships **WSLg**, so `test:headed` opens a real browser window.
 │  └─ helpers.ts                # behaviour-level flows
 ├─ scripts/
 │  ├─ build-cache.ts            # builds + verifies the wallet cache
-│  ├─ fetch-metamask.sh         # downloads MetaMask
+│  ├─ fetch-metamask.mjs        # downloads MetaMask (cross-platform: Win/mac/Linux)
 │  ├─ mint-test-tokens.ts       # mints test USDC on-chain
 │  ├─ wallet-address.ts         # the address to fund
 │  └─ check-balance.ts          # gas + token balances
@@ -212,11 +223,11 @@ WSL2 ships **WSLg**, so `test:headed` opens a real browser window.
 
 ## CI
 
-GitHub Actions runs the **entire suite** headless under `xvfb` on push / PR — all 10 tests, including every on-chain transaction. It caches the MetaMask build and the Playwright browsers, and takes ~40 minutes: MetaMask's popup needs ~30s to boot for *each* interaction, and a single supply is two transactions.
+GitHub Actions runs the e2e suites (connection, edge cases, lending `supply`) headless under `xvfb` on push / PR — real on-chain transactions, ~40 minutes, caching the MetaMask build and the Playwright browsers. The **wallet-compatibility matrix** runs on its own workflow ([`matrix.yml`](.github/workflows/matrix.yml)) so its experimental cells never gate this stable suite. `borrow / repay / withdraw` are quarantined (MV3 service-worker death — see above) and reported as skipped, not failed.
 
 **Required secrets** (a throwaway wallet only): `SEED_PHRASE`, `WALLET_PASSWORD`.
 
-A **preflight** step (`pnpm run preflight`) checks the wallet still has gas and test tokens *before* the browsers start — so a depleted wallet fails in ten seconds with an actionable message instead of twenty minutes later from inside a wallet popup. The suite nets about **-75 USDC per run**; `pnpm run mint:tokens` tops it up.
+A **preflight** step (`pnpm run preflight`) checks the wallet still has gas and test tokens *before* the browsers start — so a depleted wallet fails in ten seconds with an actionable message instead of twenty minutes later from inside a wallet popup. Each run supplies test USDC as collateral (and burns a little Base Sepolia gas); `pnpm run mint:tokens` tops the wallet up.
 
 Every run uploads a **`playwright-report` artifact** containing the videos, traces and screenshots (below).
 
@@ -227,9 +238,11 @@ Every run uploads a **`playwright-report` artifact** containing the videos, trac
 - Treat the seed as compromised the moment it touches CI — it's a throwaway, so that's fine by design.
 
 ## Next
+- [ ] Keep MetaMask's MV3 service worker alive across long runs (keep-alive ping), then un-quarantine `borrow / repay / withdraw`
+- [ ] Grow the [wallet-compatibility matrix](tests/matrix/) — more dApps, then more wallets (Rabby / OneKey / Phantom)
 - [ ] A **Foundry** suite that forks the chain and tests the contracts directly (fuzz + invariant tests)
 - [ ] Liquidation: push a position below health factor 1 and assert it's liquidatable
-- [ ] Report the MetaMask 13.13.1 Base Sepolia broadcast bug upstream
+- [x] Report the MetaMask 13.13.1 Base Sepolia broadcast bug upstream — [MetaMask/metamask-extension#44598](https://github.com/MetaMask/metamask-extension/issues/44598)
 
 ## References
 - Aave — https://aave.com/docs · Synpress — https://docs.synpress.io · Playwright — https://playwright.dev
