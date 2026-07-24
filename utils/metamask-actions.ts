@@ -485,17 +485,26 @@ export async function approveFollowUpRequests(
   context: BrowserContext,
   extensionId: string,
   max = 3,
+  firstTimeoutMs = 20_000,
 ): Promise<number> {
   let approved = 0
 
   for (let i = 0; i < max; i++) {
     try {
-      // Deliberately short. This is a "is there ANOTHER one?" probe, not a wait
-      // for a request we know is coming — and by now MetaMask's popup is already
-      // booted, so a genuine follow-up shows up quickly. A long budget here just
-      // burns ~45s of dead time on every single action, which is what pushed the
-      // lending tests over their timeout.
-      await resolveRequest(context, extensionId, 'confirm', 20_000)
+      // The FIRST attempt may be a request we KNOW is coming (a transaction the
+      // caller just triggered). Under headless MV3, Chrome can kill MetaMask's
+      // idle service worker mid-suite and it restarts LOCKED — so that first
+      // confirmation may need to boot the notification UI (~30s), unlock, and
+      // re-render before the confirm button appears. Callers submitting a real
+      // transaction pass a generous `firstTimeoutMs` for exactly this. This is
+      // why the lending `borrow` (deep into a 40-min run) timed out while
+      // `supply` (early, wallet still warm) passed.
+      //
+      // LATER attempts are just "is there ANOTHER one?" probes — kept short, so
+      // an action with no follow-up doesn't burn dead time (which is what pushed
+      // the lending tests over their timeout in the first place).
+      const budget = i === 0 ? firstTimeoutMs : 20_000
+      await resolveRequest(context, extensionId, 'confirm', budget)
       approved++
     } catch {
       break // nothing left pending
