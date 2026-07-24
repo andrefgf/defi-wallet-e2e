@@ -21,6 +21,16 @@ Headless run: `reject` = pass again (consistent), `connect` = same "still pendin
 
 Instrumented `resolveRequest` in `utils/metamask-actions.ts` (gated on `MATRIX_DEBUG`, syntax-checked, does not change control flow): logs every visible button + enabled state + testids per step, whether the confirm button is `enabled`, and saves screenshots to `test-results/matrix-debug/`. Prime suspect: a disabled confirm button (new checkbox/scroll gate in 13.39.1) — the `enabled=` line will confirm or kill that instantly.
 
+### 2026-07-24 (final on borrow) — reload fix shipped, STILL failed → quarantined
+
+Run 30101446018 ran commit 58a48a3 (which INCLUDES the reload fix) and borrow still hung. Conclusion: MV3 doesn't just lock the wallet — killing the idle service worker DROPS the in-flight tx request with the worker's memory. Unlock + re-route recovers a locked wallet but cannot resurrect a lost request; the dApp waits on a promise that never resolves. Not fixable from the test side without SW keep-alive.
+
+Applied the pre-agreed guardrail:
+- `tests/lending-lifecycle.spec.ts`: borrow/repay/withdraw → `test.fixme` (skipped, don't fail CI) with a full explanatory note. `supply` stays active — it runs early (worker alive) and proves the tx-confirm + on-chain-assertion machinery.
+- `e2e.yml`: now runs `playwright test --grep-invert "Matrix"` — the matrix has its own workflow and must not gate the stable e2e suite.
+
+e2e now = connection ×3, edge-cases ×3, supply — all green last run → should pass. Matrix runs in matrix.yml. The MV3-SW-death behaviour is a documented, sellable finding.
+
 ### 2026-07-24 (later) — borrow layer 3: post-unlock routing
 
 Re-ran with the 90s budget fix: unlock now HAPPENS (screenshot showed MetaMask unlocked on account Home), but the tx still didn't confirm — because after unlock MetaMask lands on Home, not the queued approval, so the confirm button never appears and Aave hangs on "Borrowing USDT". Fix: `unlockIfLocked` now returns bool; `getNotificationPage` (both headless + headed branches) reloads notification.html immediately after a successful unlock, routing MetaMask to the pending request. This completes the MV3-relock recovery (lock → unlock → re-route → confirm).
