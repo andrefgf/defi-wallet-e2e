@@ -211,7 +211,12 @@ async function submitModalAction(
     if (!(await waitForEnabledAction(page))) break
 
     await clickEnabledAction(page)
-    await mm.approveFollowUpRequests(context, extensionId)
+    // We just fired a transaction we KNOW is coming, so give the first
+    // confirmation a generous, unlock-aware budget: headless MV3 can kill and
+    // restart MetaMask's service worker mid-suite, leaving the wallet LOCKED
+    // when a late transaction (e.g. borrow) fires. 90s covers popup boot +
+    // unlock + re-render; the follow-up "is there another?" probes stay short.
+    await mm.approveFollowUpRequests(context, extensionId, 3, 90_000)
   }
 
   await expect(modal.success(page).or(modal.failure(page))).toBeVisible({ timeout: 180_000 })

@@ -103,11 +103,14 @@ jobs:
       - name: Preflight — wallet is funded
         run: pnpm run preflight
 
-      # The FULL suite: connection, the lending lifecycle, and the edge cases.
+      # The e2e suites: connection, the lending lifecycle, and the edge cases.
       # Every transaction is really signed in MetaMask and really settles
-      # on-chain.
+      # on-chain. The wallet-compatibility matrix (tests/matrix) is EXCLUDED here
+      # — it has its own workflow (matrix.yml), and its experimental cells must
+      # not gate this stable suite. --grep-invert drops any test whose title
+      # contains "Matrix".
       - name: Run E2E tests (headless)
-        run: xvfb-run --auto-servernum pnpm test
+        run: xvfb-run --auto-servernum pnpm exec playwright test --grep-invert "Matrix"
 
       - name: Upload Playwright report
         if: ${{ !cancelled() }}
