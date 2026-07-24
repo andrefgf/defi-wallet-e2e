@@ -86,7 +86,8 @@ test.describe('Matrix — Aave × MetaMask', () => {
 
       const stillDisconnected = await connect
         .connectWalletButton(page)
-        .isVisible({ timeout: 15_000 })
+        .waitFor({ state: 'visible', timeout: 15_000 })
+        .then(() => true)
         .catch(() => false)
       verdict('reject', stillDisconnected ? 'pass' : 'fail', `chain=${CHAIN}`)
     })
@@ -110,14 +111,21 @@ test.describe('Matrix — Aave × MetaMask', () => {
       // Why this matters: two identical CI runs disagreed (restored vs dropped)
       // because the old race broke on whichever of chip/CTA appeared first. The
       // chip is the ground truth; the CTA is noise during rehydration.
+      // Actually WAIT for the chip. `isVisible()` ignores its timeout and
+      // returns immediately (a point-in-time check) — that no-op made every run
+      // read "neither" right after reload, before anything had rendered.
+      // `waitFor` blocks until the chip is visible or 30s elapse, which is what
+      // "did the session come back?" actually needs.
       const restored = await connect
         .accountChip(page)
-        .isVisible({ timeout: 30_000 })
+        .waitFor({ state: 'visible', timeout: 30_000 })
+        .then(() => true)
         .catch(() => false)
       let outcome: 'restored' | 'dropped' | 'unknown'
       if (restored) {
         outcome = 'restored'
       } else if (await connect.connectWalletButton(page).isVisible().catch(() => false)) {
+        // Chip never returned in 30s and the Connect CTA is up → session dropped.
         outcome = 'dropped'
       } else {
         outcome = 'unknown'
