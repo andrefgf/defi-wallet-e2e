@@ -150,3 +150,99 @@ CI runs headless and is green; headless is also lighter (no rendering) so the ex
 - Control if unsure: `pnpm test tests/connection.spec.ts` — if that blocks too, it's the machine (close VS Code/other apps; Defender exclusion for repo + %TEMP%\metamask-profile-*).
 
 Do NOT record connect/reconnect until a run earns a verdict. `reject` stands on its own.
+
+---
+
+## 2026-07-26 (Sun) — `sign` cell written, not yet run
+
+Fourth flow added to `aave.metamask.spec.ts`. Written ahead of Tuesday so the
+evening is spent running it, not designing it.
+
+**What gets signed, and why that choice.** Aave exposes no plain `personal_sign`
+in its UI, so the cell fires `personal_sign` directly at the injected provider
+from Aave's origin. The alternative — driving Aave's permit-signature path —
+couples the cell to Aave's supply flow, which the lending suite already covers
+and which would make the *wallet* cell fail whenever the *dApp* changed. The
+cell must measure the wallet.
+
+**Ground truth.** `recoverMessageAddress` (viem) recovers the signer from the
+signature and compares it to the connected account. Per `matrix/flows.md`: not
+"the modal closed", not "a toast appeared".
+
+**The nonce matters.** The message carries an ISO timestamp, so it is new on
+every run. A mocked provider handing back a canned signature recovers to the
+wrong address and the cell reads `fail`. The assertion and the signature share
+no assumption — which is the one thing a mocked suite structurally cannot claim.
+
+**Provider resolved by EIP-6963 `rdns`, not `window.ethereum`.** Today the test
+profile loads only MetaMask, so both agree and this looks like ceremony. It is
+not: on a real browser `window.ethereum` has been observed reporting
+`isMetaMask: true` AND `isOneKey: true` simultaneously. The moment Rabby joins
+the matrix, a cell trusting the legacy slot would silently measure the wrong
+wallet. The verdict line reports which path resolved (`via=`), so a fallback to
+the legacy slot is visible rather than silent.
+
+**Approval budget** is 90s on the first request — MV3 can kill and restart the
+service worker, and it comes back locked.
+
+**Not yet verified:** the sandbox can't typecheck (pnpm symlink store doesn't
+materialise) and can't drive a real wallet. Run `pnpm run typecheck` before the
+first run.
+
+### Also fixed
+`reconnect`'s blocked message claimed "within 45s" while the wait is 30s. Cosmetic,
+but the message is the thing that gets pasted into a diagnosis, so it should be true.
+
+---
+
+## 2026-07-26 (Sun) — local run: 4 red, but the cause is the machine
+
+`pnpm test tests/matrix/aave.metamask.spec.ts` — typecheck clean, all four cells red.
+
+| Cell | Duration | Outcome |
+|---|---|---|
+| connect | 20.0m | test timeout (600s) ×3 |
+| sign | 20.0m | test timeout (600s) ×3 |
+| reject | 59.6s | **printed `pass`**, then timed out in teardown |
+| reconnect | 5.5m | `blocked` — "did not act on confirm after 6 steps" inside `connectToDapp` |
+
+### What the screenshots actually show
+
+- **connect** (`test-failed-4.png`): Aave sitting on **"Requesting Connection — Open the MetaMask browser extension"**. The dApp fired the request and nothing answered.
+- **reconnect** (`test-failed-3.png`): **MetaMask is on the LOCK SCREEN.** Password field empty, Unlock greyed out.
+
+That's the MV3 service-worker death signature — the same one that quarantined
+borrow/repay/withdraw. What's new is that it's now hitting **connect**, at the
+very start of a run, not just a late transaction. The confirm loop then spends
+its six steps hunting for a confirm button on a lock screen.
+
+### Not a code regression
+
+`reject` **printed its verdict and passed.** If the confirm loop or the unlock
+path were fundamentally broken, reject would have died too. The logic is intact;
+the environment starved.
+
+### Aggravator: `trace: 'on'` is back
+
+`playwright.config.ts:49` has `trace: 'on'`, and there's a `trace.zip` in every
+result folder. Tracing snapshots the DOM on **every action** — against a real
+MetaMask plus Aave, over a 20-minute run, that's exactly the memory pressure
+that gets the service worker reaped. Trace was turned **off** once before for
+this precise reason and has drifted back on.
+
+### ⚠️ The sign cell is UNTESTED
+
+`sign` calls `connectWallet` first, and connect never completed. Nothing was
+learned about the new code — not that it works, not that it doesn't. Do not
+record anything for it.
+
+### Decision: verdicts get earned in CI, not on the laptop
+
+`matrix.yml`'s own header already says it — *"CI, where there's enough memory to
+actually drive a real wallet — a laptop OOMs on headed Chromium + MetaMask +
+Aave."* Local runs are for iterating on logic; **a cell is only recorded from a
+CI run.** This has now cost two evenings across two separate sessions. Stop
+paying it.
+
+Consequence for the Rabby work: bring the wallet up locally one cell at a time
+with `--trace off` and `MM_DEBUG=1`, but earn every verdict in CI.
