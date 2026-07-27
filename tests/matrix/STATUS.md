@@ -246,3 +246,206 @@ paying it.
 
 Consequence for the Rabby work: bring the wallet up locally one cell at a time
 with `--trace off` and `MM_DEBUG=1`, but earn every verdict in CI.
+
+---
+
+## 2026-07-26 (Sun) — CI: 4/4 GREEN. MetaMask column complete.
+
+Matrix run #8, commit `4894869`, manually triggered. **Success, 12m 30s, 4 passed.**
+https://github.com/andrefgf/defi-wallet-e2e/actions/runs/30212701804
+
+```
+connect   = pass  chip="0xb1...c171" == account 0xb1c375ec204f581a4ae3ca04fdbd4292dca1c171
+sign      = pass  recovered=0xB1c375ec...c171, account=0xb1c375ec...c171, via=eip6963
+reconnect = pass  outcome=restored, before == after
+reject    = pass
+```
+
+All four transcribed into `matrix/data/results.csv` with the run URL as evidence.
+**Aave × MetaMask is 4/4 — the first complete column.**
+
+### The sign cell worked on its first real execution
+
+- `via=eip6963` — the provider was resolved by **rdns**, not the legacy
+  `window.ethereum` fallback. That path is now proven, which materially de-risks
+  Rabby: the mechanism for targeting a specific wallet among several works.
+- `recovered` came back EIP-55 checksummed (`0xB1c3…`) against a lowercase
+  `account` (`0xb1c3…`). The case-insensitive comparison handled it. A naive
+  `===` would have reported a **false `fail`** — worth remembering for every
+  future wallet.
+
+### reconnect: flip-flop resolved
+
+`outcome=restored`, same account either side of the reload. The `waitFor` fix
+holds. The two contradictory CI runs from 07-23 were the harness racing, exactly
+as diagnosed — `isVisible()` ignoring its timeout.
+
+### The laptop-vs-CI experiment is now settled
+
+Same spec, same commit, hours apart: **laptop all-red, CI all-green.** That is as
+clean a natural experiment as this project will ever get, and it retires the
+question. Iterate locally; **record only from CI.**
+
+### Note for future runs
+The CI wallet (`0xb1c375…c171`, from the `SEED_PHRASE` secret) is a *different*
+account from the local `.env` wallet (`0xf39f…2266`). Expected, and correct — but
+it means cell notes should always name which account was used, since a reader
+comparing two runs would otherwise see a mismatch and assume a bug.
+
+---
+
+## 2026-07-26 (Sun) — Rabby prep done ahead of Wednesday
+
+Three unknowns closed without touching the harness.
+
+**1. Rabby announces cleanly over EIP-6963 — go.**
+Probe run with five extensions installed together:
+
+| wallet | rdns |
+|---|---|
+| Rabby | **`io.rabby`** |
+| OneKey | `so.onekey.app.wallet` |
+| MetaMask | `io.metamask` |
+| Phantom | `app.phantom` |
+| Brave Wallet | `com.brave.wallet` |
+
+All five announced **synchronously**. `RDNS = 'io.rabby'` is what the Rabby spec targets.
+
+**2. The legacy slot changed owner — a real finding.**
+`window.ethereum` on 2026-07-26 reports `isMetaMask: true` **AND** `isRabby: true`,
+with no `providers` array. On 2026-07-21, before Rabby was installed, the same
+machine reported `isMetaMask: true` and `isOneKey: true`.
+
+Same laptop, same user, five days apart, different answer — because one more
+extension was installed. **Two separate vendors have now been observed claiming
+`isMetaMask` on the legacy slot**, so it isn't a OneKey quirk. Anything detecting
+wallets via `window.ethereum.isMetaMask` is reading install order, not intent.
+
+This retroactively justifies the sign cell resolving by rdns. Had the Rabby cells
+trusted `window.ethereum` they'd have *accidentally* passed — Rabby owns it today —
+while the MetaMask cells would have silently measured Rabby.
+
+**3. Distribution: prebuilt zip, no build-from-source.**
+`Rabby_v0.93.100.zip`, 16.1 MB, released 24 Jul:
+`https://github.com/RabbyHub/Rabby/releases/download/v{VERSION}/Rabby_v{VERSION}.zip`
+
+`scripts/fetch-rabby.mjs` written and wired to `pnpm run fetch:rabby`. Pinned to
+0.93.100 by default (`RABBY_VERSION` overrides) — a floating version makes a cell
+verdict irreproducible, and MetaMask's 13.13.1→13.39.1 testid rename already cost
+us a day. It prints the resolved `manifest.version` so `wallet_version` in
+results.csv can finally be filled.
+
+**Untested:** the download itself. Sandbox DNS blocks github.com. The zip's
+internal layout is therefore unknown, so `findManifestDir()` accepts manifest.json
+at the root *or* one level down and prints which it found. First real run is
+`pnpm run fetch:rabby` on the laptop — that is a download, not a wallet flow, so
+local is fine.
+
+### Still open for Wednesday
+Rabby's **UI actions** — unlock, approve, reject — are the actual work. Nothing
+here shortcuts that. Deliberately did NOT write `aave.rabby.spec.ts` or generalise
+`metamask-actions.ts`: both need Rabby's real selectors, and guessing them is how
+you get a day of debugging a fiction.
+
+---
+
+## 2026-07-26 (Sun) — Rabby import WORKS end to end
+
+`scripts/probe-rabby.ts` drove Rabby 0.93.100 from a fresh profile to an unlocked
+dashboard. Every route and selector below is verified, not inferred.
+
+```
+#/new-user/guide                           "I already have an address"
+#/new-user/import-wallet-type              "Seed Phrase"
+#/new-user/import/seed-or-key              12 masked inputs -> "Next"
+#/new-user/import/seed-phrase/set-password "Password (8 characters min)"
+                                           "Confirm Password" -> "Confirm"
+#/new-user/success?hd=HD%20Key%20Tree      "Open Wallet"
+index.html                                 dashboard: Swap/Send/Bridge/Receive
+```
+
+Written up as `utils/rabby-onboarding.ts`.
+
+### popup.html was never broken
+It failed on three earlier probes with "target closed" — because there was **no
+wallet yet**. Once the vault existed it painted the full dashboard. Same for
+`notification.html`: an approval surface with nothing pending closes itself.
+Three runs were spent treating a normal empty state as a defect.
+
+### The one thing NOT established: why fill() fails
+
+`fill()` populated all twelve boxes — correct DOM values, `Next` enabled — and
+clicking Next did nothing. No navigation, no error text. `pressSequentially`
+immediately afterwards worked.
+
+**Two explanations survive and this run cannot separate them:**
+
+1. The component tracks state via key events and never sees a programmatic value.
+2. It validates asynchronously and the click arrived before validation settled.
+
+André raised (2) unprompted and it fits the evidence exactly as well as (1) —
+typing 12 words at 30ms/char also spends ~3s, so `type()` changed the input
+mechanism **and** the elapsed time. Only one variable should have moved.
+
+**The experiment:** `fill()`, wait 3s, then click.
+- advances -> timing, explanation (2)
+- does not -> input mechanism, explanation (1)
+
+**Do not write "Rabby cannot be driven by fill()" into the matrix until this is
+run.** It would be a published claim about a vendor's product resting on a
+confounded experiment, which is exactly the Safe #8307 mistake.
+
+`rabby-onboarding.ts` uses keystrokes because that satisfies both explanations.
+
+### Rabby vs MetaMask, for the record
+| | MetaMask | Rabby |
+|---|---|---|
+| test hooks | `confirm-btn`, `unlock-password`, … | **none** |
+| approval page | `notification.html` | `notification.html` (same) |
+| full UI | `home.html` | `index.html` |
+| manifest | MV3 | **MV3** |
+| seed entry | grid | 12 masked inputs, keystrokes required |
+
+MV3 on both means the service-worker death that quarantined borrow/repay/withdraw
+is a platform property, not a MetaMask quirk. Expect it here too.
+
+---
+
+## 2026-07-26 (Sun) — RESOLVED: it was timing, not the input mechanism
+
+Controlled three-way run, one variable moved at a time:
+
+```
+A  fill() + click immediately      → did NOT advance
+B  fill() + settle 3s + click      → ADVANCED  ✅
+C  real keystrokes                 → not reached
+```
+
+A and B were identical except the 3s wait — both re-entered the words with
+`fill()` from cleared boxes. Clean isolation.
+
+**`fill()` works. Rabby validates the seed asynchronously (debounced across all
+twelve fields) and `Next` stays enabled the entire time regardless of validity.
+A click landing before validation completes does nothing: no navigation, no
+error, no clue.**
+
+André called this from the UX before any of it was instrumented. The competing
+theory — that Rabby ignores programmatic values and needs real keystrokes — was
+mine, was mechanically plausible, and is **false**.
+
+### Why running the experiment mattered
+"Rabby cannot be driven by `fill()`" was one step from being written into the
+matrix as a published finding about a vendor's product. It would have been
+wrong, and wrong in a way a Rabby engineer could disprove in five minutes. The
+confound was that `type()` changed the input mechanism AND spent ~3s doing it;
+two variables moved, so the earlier run could not distinguish them.
+
+Second time this pattern has appeared (see Safe #8307). The rule holds: when two
+explanations fit, isolate before publishing.
+
+### Consequence for the code
+`utils/rabby-onboarding.ts` uses `fill()` plus a 3s settle — simpler and faster
+than typing 12 words at 30ms/char — with one retry at double the settle, since
+the value is empirical and a loaded machine may need longer. The settle is
+load-bearing and commented as such; there is no signal to poll for, because the
+button never reflects validity.

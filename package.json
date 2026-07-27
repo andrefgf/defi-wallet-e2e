@@ -22,6 +22,8 @@
     "wallet:balance": "tsx scripts/check-balance.ts",
     "mint:tokens": "tsx scripts/mint-test-tokens.ts",
     "fetch:metamask": "node scripts/fetch-metamask.mjs",
+    "fetch:rabby": "node scripts/fetch-rabby.mjs",
+    "probe:rabby": "pnpm run fetch:rabby && tsx scripts/probe-rabby.ts",
     "build:cache": "pnpm run fetch:metamask && tsx scripts/build-cache.ts",
     "build:cache:headless": "pnpm run fetch:metamask && cross-env HEADLESS=true tsx scripts/build-cache.ts",
     "test": "cross-env HEADLESS=true playwright test",
