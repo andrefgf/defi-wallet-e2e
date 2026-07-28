@@ -496,3 +496,69 @@ Transaction and signature approvals. No probe has driven a signature through
 Rabby yet. `CONFIRM_LABELS` therefore carries "Sign" and "Confirm" as
 candidates from the shipped locale file, flagged in-comment. Prune the list once
 a real signature has been observed — do not assume it.
+
+---
+
+## 2026-07-28 (Tue) — CI #9: Rabby/reject PASS, three cells blocked. Cause found.
+
+Run #9 (`e59627d`) **succeeded** — MetaMask still 4/4, no regression from adding
+Rabby, and **Rabby's cache built headless in CI in 1m24s**. Rabby/reject = pass,
+recorded. Matrix is 5/16.
+
+connect, sign and reconnect all blocked on the SAME line: `connect.accountChip`
+never visible.
+
+### Reject passing was the clue
+It proves the whole Rabby harness works: extension loads, profile unlocks, Aave
+lists Rabby, `notification.html#/approval` opens, the click lands, Aave returns
+to its disconnected state. Only the state AFTER approving fails.
+
+### The measurement that settled it
+`scripts/probe-rabby-aave.ts` read the provider rather than the DOM:
+
+```
+accounts: ["0xe59c45...706010"]   chainId: "0x1"
+>>> CONNECTED but on 0x1 — network switch FAILED
+```
+
+Connect works. The wallet is authorised **on Ethereum**.
+
+### And then the screenshot
+Aave's follow-up raised Rabby's **"Add Custom Network to Rabby"** dialog,
+pre-filled with:
+
+```
+Chain ID       43113
+Network name   Avalanche Fuji
+RPC URL        https://api.avax-test.network/ext/bc/C/rpc
+Currency       AVAX
+```
+
+**Aave asked for Avalanche Fuji, not Base Sepolia (84532).** `utils/helpers.ts`
+already documented this — *"Aave lands the wallet on whatever chain it fancies
+(we've watched it add Avalanche Fuji)"* — which is exactly why the MetaMask path
+never trusts Aave's switch and calls `wallet_addEthereumChain` itself.
+
+**My Rabby connect flow didn't.** It relied on Aave's switch, which the repo
+already knew was unreliable. That's the bug, and it was mine.
+
+### Two fixes
+1. **`CONFIRM_LABELS` was missing `/^add$/i`.** Rabby's add-network dialog's
+   primary button is **"Add"**, not Confirm. Even a correct request would not
+   have been approved. `/^switch/i` added alongside it.
+2. **`ensureNetwork()` added to the Rabby spec**, mirroring `helpers.ts`: check
+   the chain, fire `wallet_addEthereumChain` with Base Sepolia params ourselves,
+   approve Rabby's dialog, then poll until the chain actually changes and throw
+   with the observed chainId if it doesn't.
+
+### Side observation, genuinely matrix-relevant
+MetaMask and Rabby receive the *same* `wallet_addEthereumChain` and present it
+very differently. MetaMask shows a standard approval. Rabby shows a form headed
+*"Rabby cannot verify the security of custom networks. Please add trusted
+networks only."* Same request, materially higher friction and a security warning
+on one wallet. Not one of the four flows, but worth writing up when the matrix
+is published.
+
+### Also worth noting
+Rabby ships **82 chains, all mainnets**. No Base Sepolia. Every testnet is a
+"custom network" with that warning attached.

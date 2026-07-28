@@ -26,6 +26,7 @@
     "probe:rabby": "pnpm run fetch:rabby && tsx scripts/probe-rabby.ts",
     "build:cache:rabby": "pnpm run fetch:rabby && tsx scripts/build-cache-rabby.ts",
     "probe:rabby:approval": "tsx scripts/probe-rabby-approval.ts",
+    "probe:rabby:aave": "tsx scripts/probe-rabby-aave.ts",
     "build:cache": "pnpm run fetch:metamask && tsx scripts/build-cache.ts",
     "build:cache:headless": "pnpm run fetch:metamask && cross-env HEADLESS=true tsx scripts/build-cache.ts",
     "test": "cross-env HEADLESS=true playwright test",

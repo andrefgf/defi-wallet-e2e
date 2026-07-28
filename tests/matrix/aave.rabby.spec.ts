@@ -2,6 +2,7 @@ import { test } from '../../fixtures/rabby'
 import { connect } from '../../utils/selectors'
 import { capture, dismissAnalyticsPrompt } from '../../utils/helpers'
 import * as rabby from '../../utils/rabby-actions'
+import { BASE_SEPOLIA, addChainParams } from '../../utils/networks'
 import { recoverMessageAddress, stringToHex } from 'viem'
 import type { Page } from '@playwright/test'
 
@@ -81,6 +82,89 @@ function chipMatches(chipText: string, account: string): boolean {
  * throughout. Kept local and explicit until both wallets are green, at which
  * point the shared parts can be lifted with tests standing behind the change.
  */
+/** Ask the connected wallet which chain it is on (EIP-1193, via rdns). */
+async function currentChainId(page: Page): Promise<string | null> {
+  return page
+    .evaluate(
+      `(() => new Promise(function (resolve) {
+        var chosen = null
+        window.addEventListener('eip6963:announceProvider', function (e) {
+          if (e.detail && e.detail.info && e.detail.info.rdns === ${JSON.stringify(RDNS)}) chosen = e.detail.provider
+        })
+        window.dispatchEvent(new Event('eip6963:requestProvider'))
+        setTimeout(function () {
+          var p = chosen || window.ethereum
+          if (!p) { resolve(null); return }
+          p.request({ method: 'eth_chainId' }).then(resolve).catch(function () { resolve(null) })
+        }, 800)
+      }))()`,
+    )
+    .then((v) => (v as string | null) ?? null)
+    .catch(() => null)
+}
+
+/**
+ * Put Rabby on Base Sepolia ourselves. NOT optional, and not book-keeping.
+ *
+ * VERIFIED 2026-07-28 (`scripts/probe-rabby-aave.ts`): after a successful
+ * connect, Rabby authorises the account on **Ethereum (0x1)**. Aave then tries
+ * to switch and asks the wallet to add — of all things — **Avalanche Fuji
+ * (43113)**, pre-filled into Rabby's "Add Custom Network" form. `helpers.ts`
+ * already documented that Aave "lands the wallet on whatever chain it fancies
+ * (we've watched it add Avalanche Fuji)"; this is that, reproduced.
+ *
+ * So the wallet never reaches Base Sepolia, Aave treats it as not usable, and
+ * the account chip never renders. Three cells blocked in CI run #9 for exactly
+ * this. The MetaMask path has always driven the switch itself — this is the
+ * Rabby equivalent, and it should have been here from the start.
+ */
+async function ensureNetwork(
+  page: Page,
+  context: import('@playwright/test').BrowserContext,
+  extensionId: string,
+): Promise<void> {
+  if ((await currentChainId(page)) === BASE_SEPOLIA.chainIdHex) return
+
+  // Not awaited yet: it settles only once the wallet prompt is answered.
+  const request = page
+    .evaluate(
+      `(() => {
+        var params = ${JSON.stringify(addChainParams())}
+        var chosen = null
+        window.addEventListener('eip6963:announceProvider', function (e) {
+          if (e.detail && e.detail.info && e.detail.info.rdns === ${JSON.stringify(RDNS)}) chosen = e.detail.provider
+        })
+        window.dispatchEvent(new Event('eip6963:requestProvider'))
+        return new Promise(function (resolve) {
+          setTimeout(function () {
+            var p = chosen || window.ethereum
+            if (!p) { resolve('no provider'); return }
+            p.request({ method: 'wallet_addEthereumChain', params: [params] })
+              .then(function () { resolve('ok') })
+              .catch(function (e) { resolve('rejected: ' + (e && e.message)) })
+          }, 800)
+        })
+      })()`,
+    )
+    .catch(() => 'evaluate failed')
+
+  // Rabby's dialog for this is "Add Custom Network to Rabby" with an **Add**
+  // button — hence /^add$/i in rabby-actions.CONFIRM_LABELS.
+  await rabby.approveFollowUpRequests(context, extensionId, 3, 45_000)
+  await request
+
+  const deadline = Date.now() + 45_000
+  while (Date.now() < deadline) {
+    if ((await currentChainId(page)) === BASE_SEPOLIA.chainIdHex) return
+    await page.waitForTimeout(1000)
+  }
+
+  throw new Error(
+    `Rabby is not on ${BASE_SEPOLIA.chainName} — it reports ${await currentChainId(page)}. ` +
+      'Aave shows "Wrong Network" and never renders an account.',
+  )
+}
+
 async function connectWallet(page: Page, context: import('@playwright/test').BrowserContext, extensionId: string) {
   await page.goto('/')
   await page.waitForLoadState('domcontentloaded')
@@ -96,9 +180,8 @@ async function connectWallet(page: Page, context: import('@playwright/test').Bro
 
   await rabby.connectToDapp(context, extensionId)
 
-  // Rabby defaults the connect approval to Ethereum (probe, 2026-07-26), so
-  // Aave will raise an add/switch-network request straight after.
-  await rabby.approveFollowUpRequests(context, extensionId, 3, 30_000)
+  // Approving the connection is NOT the end of the handshake — see ensureNetwork.
+  await ensureNetwork(page, context, extensionId)
 }
 
 test.describe('Matrix — Aave × Rabby', () => {

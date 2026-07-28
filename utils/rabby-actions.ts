@@ -30,7 +30,19 @@ const UNLOCK_PLACEHOLDER = /enter the password to unlock/i
  * but no probe has yet driven a signature through Rabby. When one does, prune
  * this list to what actually appears.
  */
-const CONFIRM_LABELS = [/^connect$/i, /^confirm$/i, /^sign$/i, /^approve$/i, /^next$/i]
+const CONFIRM_LABELS = [
+  /^connect$/i,
+  /^confirm$/i,
+  /^sign$/i,
+  /^approve$/i,
+  /^next$/i,
+  // VERIFIED 2026-07-28: `wallet_addEthereumChain` renders "Add Custom Network
+  // to Rabby" and its primary button is **"Add"**, not Confirm. Its absence
+  // from this list is why CI run #9 blocked three Rabby cells: the chain was
+  // never added, the wallet stayed on 0x1, and Aave never showed an account.
+  /^add$/i,
+  /^switch/i,
+]
 const CANCEL_LABELS = [/^cancel$/i, /^reject$/i]
 
 /** Click the first label that is present and enabled. */
