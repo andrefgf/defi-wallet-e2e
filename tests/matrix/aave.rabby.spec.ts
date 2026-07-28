@@ -148,9 +148,15 @@ async function ensureNetwork(
     )
     .catch(() => 'evaluate failed')
 
-  // Rabby's dialog for this is "Add Custom Network to Rabby" with an **Add**
-  // button — hence /^add$/i in rabby-actions.CONFIRM_LABELS.
-  await rabby.approveFollowUpRequests(context, extensionId, 3, 45_000)
+  // CHAIN-AWARE approval. Aave races us with its own add-chain request for
+  // Avalanche Fuji (43113) — CI #10 approved that one and landed on 0xa869.
+  // approveChainDialog reads the Chain ID out of the form and cancels anything
+  // that isn't 84532.
+  //
+  // In practice this should now be a no-op: build-cache-rabby.ts pre-provisions
+  // Base Sepolia, so the chain already exists and this is a plain switch. It
+  // stays as the safety net for a stale cache.
+  await rabby.approveChainDialog(context, extensionId, BASE_SEPOLIA.chainId)
   await request
 
   const deadline = Date.now() + 45_000

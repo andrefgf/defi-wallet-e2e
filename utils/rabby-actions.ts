@@ -126,6 +126,63 @@ export async function getNotificationPage(
   )
 }
 
+/**
+ * Approve a chain dialog ONLY if it is offering the chain we asked for.
+ *
+ * CI run #10 taught this the expensive way. Aave fires its own
+ * `wallet_addEthereumChain` for **Avalanche Fuji (43113)** at the same moment
+ * the harness fires one for Base Sepolia (84532). Blind approval clicked "Add"
+ * on whichever dialog surfaced first, Rabby dutifully added Fuji, and the
+ * wallet ended up on `0xa869` — a *different* wrong network from the `0x1` it
+ * started on. Progress, but still wrong.
+ *
+ * So: read the Chain ID out of the form. Approve on a match, CANCEL on a
+ * mismatch, and keep looking. Never approve a chain dialog blind again.
+ */
+export async function approveChainDialog(
+  context: BrowserContext,
+  extensionId: string,
+  expectedChainIdDec: number,
+  attempts = 4,
+): Promise<boolean> {
+  for (let i = 0; i < attempts; i++) {
+    const page = await getNotificationPage(context, extensionId, i === 0 ? 30_000 : 8000).catch(
+      () => null,
+    )
+    if (!page) return false
+
+    const body = await page.evaluate(`document.body ? document.body.innerText : ''`).catch(() => '')
+    const text = String(body)
+
+    // Not a chain dialog at all (e.g. a leftover connect prompt) — approve it
+    // and move on; it isn't the thing we're guarding against.
+    if (!/custom network|chain id/i.test(text)) {
+      await clickFirstLabel(page, CONFIRM_LABELS, 8000)
+      await new Promise((r) => setTimeout(r, 1500))
+      continue
+    }
+
+    const offered = await page
+      .locator('input')
+      .first()
+      .inputValue()
+      .catch(() => '')
+    const matches = offered.trim() === String(expectedChainIdDec)
+
+    if (matches) {
+      const ok = await clickFirstLabel(page, [/^add$/i, /^confirm$/i, /^switch/i], 8000)
+      if (ok) return true
+      return false
+    }
+
+    // Wrong chain — refuse it. This is Aave's Fuji request, not ours.
+    console.log(`  [rabby] declining chain dialog offering ${offered || '?'}, want ${expectedChainIdDec}`)
+    await clickFirstLabel(page, CANCEL_LABELS, 8000)
+    await new Promise((r) => setTimeout(r, 2000))
+  }
+  return false
+}
+
 /** Approve a pending connection request. */
 export async function connectToDapp(context: BrowserContext, extensionId: string): Promise<void> {
   const page = await getNotificationPage(context, extensionId)

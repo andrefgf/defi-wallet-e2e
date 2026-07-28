@@ -5,6 +5,8 @@ import crypto from 'node:crypto'
 import 'dotenv/config'
 import { rabbyExtensionPath, browserArgsFor, CACHE_DIR, RABBY_VERSION } from '../utils/wallet-cache'
 import { importWallet, openOnboarding } from '../utils/rabby-onboarding'
+import { approveChainDialog } from '../utils/rabby-actions'
+import { BASE_SEPOLIA, addChainParams } from '../utils/networks'
 
 /**
  * Build the Rabby wallet cache: a Chromium profile with Rabby installed and the
@@ -77,6 +79,53 @@ async function main() {
       // looks built and contains no wallet — the exact failure the MetaMask
       // builder was hardened against.
       await page.waitForTimeout(8000)
+
+      // --- pre-provision Base Sepolia -------------------------------------
+      //
+      // Rabby ships 82 chains, ALL mainnets. Every testnet is a "custom
+      // network" behind a security warning. If the chain isn't present before
+      // the tests run, each spec has to add it mid-connect — racing Aave, which
+      // fires its own add-chain request for Avalanche Fuji at the same instant.
+      // CI #10 lost that race and ended up on 0xa869.
+      //
+      // Adding it here, once, on a neutral page, removes the race entirely.
+      // This is SETUP, not the thing under test: the four matrix flows are
+      // connect / sign / reconnect / reject. The MetaMask harness likewise
+      // drives its own network switch rather than trusting the dApp, so both
+      // wallets are treated identically.
+      console.log('pre-provisioning Base Sepolia...')
+      const neutral = await context.newPage()
+      await neutral
+        .goto('https://example.com', { waitUntil: 'domcontentloaded', timeout: 30_000 })
+        .catch(() => {})
+      await neutral.waitForTimeout(2000)
+
+      const add = neutral
+        .evaluate(
+          `(() => {
+            var params = ${JSON.stringify(addChainParams())}
+            var chosen = null
+            window.addEventListener('eip6963:announceProvider', function (e) {
+              if (e.detail && e.detail.info && e.detail.info.rdns === 'io.rabby') chosen = e.detail.provider
+            })
+            window.dispatchEvent(new Event('eip6963:requestProvider'))
+            return new Promise(function (resolve) {
+              setTimeout(function () {
+                var p = chosen || window.ethereum
+                if (!p) { resolve('no provider'); return }
+                p.request({ method: 'wallet_addEthereumChain', params: [params] })
+                  .then(function () { resolve('ok') })
+                  .catch(function (e) { resolve('rejected: ' + (e && e.message)) })
+              }, 1000)
+            })
+          })()`,
+        )
+        .catch(() => 'evaluate failed')
+
+      const approved = await approveChainDialog(context, id, BASE_SEPOLIA.chainId)
+      console.log(`  add-chain dialog approved: ${approved} (${await add})`)
+      await neutral.waitForTimeout(3000)
+      await neutral.close().catch(() => {})
     } finally {
       await context.close()
     }
