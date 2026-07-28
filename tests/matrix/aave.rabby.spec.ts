@@ -1,0 +1,235 @@
+import { test } from '../../fixtures/rabby'
+import { connect } from '../../utils/selectors'
+import { capture, dismissAnalyticsPrompt } from '../../utils/helpers'
+import * as rabby from '../../utils/rabby-actions'
+import { recoverMessageAddress, stringToHex } from 'viem'
+import type { Page } from '@playwright/test'
+
+/**
+ * MATRIX RUNNER — Rabby × Aave (Base Sepolia).
+ *
+ * Same verdict model as `aave.metamask.spec.ts`:
+ *   pass / fail  — we measured the cell. Test stays GREEN either way; a `fail`
+ *                  is a finding, not a broken test.
+ *   blocked      — we could NOT measure. The flow throws, runCell prints one
+ *                  honest blocked line, the test goes red. Never a `fail`.
+ *
+ * FIRST RUN EXPECTATIONS. This has never executed. The connect and reject paths
+ * use selectors verified by `scripts/probe-rabby-approval.ts` ("Connect" /
+ * "Cancel" on notification.html#/approval). The SIGN path has never been
+ * observed in Rabby — `rabby-actions.CONFIRM_LABELS` carries "Sign"/"Confirm"
+ * as candidates from the shipped locale file. If sign comes back `blocked`,
+ * that is the expected failure, not a surprise: probe it, then prune the list.
+ *
+ * Transcribe:  node record.mjs --dapp Aave --wallet Rabby --flow X --result Y
+ */
+
+const CHAIN = 'base-sepolia'
+
+/**
+ * Rabby's EIP-6963 identity, verified by console probe 2026-07-26.
+ *
+ * This is why the matrix resolves providers by rdns. On André's own machine
+ * `window.ethereum` reported isMetaMask AND isRabby simultaneously — a cell
+ * trusting the legacy slot would silently measure whichever extension won the
+ * injection race.
+ */
+const RDNS = 'io.rabby'
+
+async function runCell(flow: string, body: () => Promise<void>): Promise<void> {
+  try {
+    await body()
+  } catch (error) {
+    const message = (error instanceof Error ? error.message : String(error)).replace(/\s+/g, ' ')
+    console.log(`MATRIX: Aave/Rabby/${flow} = blocked (${message.slice(0, 160)})`)
+    throw error
+  }
+}
+
+function verdict(flow: string, result: 'pass' | 'fail', detail: string): void {
+  console.log(`MATRIX: Aave/Rabby/${flow} = ${result} (${detail})`)
+}
+
+/** Account the EIP-6963 provider is authorised for — read from it, not the DOM. */
+async function authorisedAccount(page: Page): Promise<string | null> {
+  return page
+    .evaluate(
+      `(() => {
+        var eth = window.ethereum
+        if (!eth) return null
+        return eth.request({ method: 'eth_accounts' }).then(function (a) { return (a && a[0]) || null })
+      })()`,
+    )
+    .then((v) => (v as string | null) ?? null)
+    .catch(() => null)
+}
+
+/** Does the dApp's truncated chip (0xb1…c171, head length varies) refer to `account`? */
+function chipMatches(chipText: string, account: string): boolean {
+  const acc = account.toLowerCase().replace(/^0x/, '')
+  const parts = chipText.toLowerCase().replace(/0x/g, '').match(/[0-9a-f]+/g) || []
+  const head = parts[0]
+  const tail = parts[parts.length - 1]
+  if (!head || !tail) return false
+  return acc.startsWith(head) && acc.endsWith(tail)
+}
+
+/**
+ * Connect Rabby to Aave.
+ *
+ * Not reusing `helpers.connectWallet` — that one calls into `metamask-actions`
+ * throughout. Kept local and explicit until both wallets are green, at which
+ * point the shared parts can be lifted with tests standing behind the change.
+ */
+async function connectWallet(page: Page, context: import('@playwright/test').BrowserContext, extensionId: string) {
+  await page.goto('/')
+  await page.waitForLoadState('domcontentloaded')
+  await dismissAnalyticsPrompt(page)
+
+  await connect.connectWalletButton(page).click()
+
+  // Aave lists wallets by their announced name. Rabby announces as
+  // "Rabby Wallet" over EIP-6963.
+  const option = page.getByRole('button', { name: /rabby/i }).first()
+  await option.waitFor({ state: 'visible', timeout: 20_000 })
+  await option.click()
+
+  await rabby.connectToDapp(context, extensionId)
+
+  // Rabby defaults the connect approval to Ethereum (probe, 2026-07-26), so
+  // Aave will raise an add/switch-network request straight after.
+  await rabby.approveFollowUpRequests(context, extensionId, 3, 30_000)
+}
+
+test.describe('Matrix — Aave × Rabby', () => {
+  test('connect', async ({ page, context, extensionId }) => {
+    await runCell('connect', async () => {
+      await connectWallet(page, context, extensionId)
+
+      await connect.accountChip(page).waitFor({ state: 'visible', timeout: 30_000 })
+
+      const account = await authorisedAccount(page)
+      const chip = await connect.accountChip(page).innerText().catch(() => '')
+      const ok = !!account && chipMatches(chip, account)
+      verdict('connect', ok ? 'pass' : 'fail', `chip="${chip}", account=${account}, chain=${CHAIN}`)
+    })
+  })
+
+  test('sign', async ({ page, context, extensionId }) => {
+    await runCell('sign', async () => {
+      await connectWallet(page, context, extensionId)
+      await connect.accountChip(page).waitFor({ state: 'visible', timeout: 30_000 })
+
+      const account = await authorisedAccount(page)
+      if (!account) throw new Error('sign: no authorised account after connect')
+
+      // Fresh message per run. A canned signature from a mocked provider
+      // recovers to the wrong address, so this cell cannot be faked.
+      const message = `Prumada wallet-layer matrix — Aave/Rabby sign check @ ${new Date().toISOString()}`
+      const hexMessage = stringToHex(message)
+
+      const pending = page.evaluate(
+        `(() => {
+          var rdns = ${JSON.stringify(RDNS)}
+          var hex = ${JSON.stringify(hexMessage)}
+          var from = ${JSON.stringify(account)}
+          return new Promise(function (resolve) {
+            var chosen = null
+            function onAnnounce(e) {
+              if (e.detail && e.detail.info && e.detail.info.rdns === rdns) chosen = e.detail.provider
+            }
+            window.addEventListener('eip6963:announceProvider', onAnnounce)
+            window.dispatchEvent(new Event('eip6963:requestProvider'))
+            setTimeout(function () {
+              var provider = chosen || window.ethereum
+              if (!provider) { resolve({ error: 'no provider' }); return }
+              provider.request({ method: 'personal_sign', params: [hex, from] })
+                .then(function (sig) { resolve({ signature: sig, via: chosen ? 'eip6963' : 'window.ethereum' }) })
+                .catch(function (e) { resolve({ error: (e && e.message) || String(e) }) })
+            }, 1500)
+          })
+        })()`,
+      )
+
+      await rabby.approveFollowUpRequests(context, extensionId, 3, 60_000)
+      await capture(page, 'rabby sign — after approval')
+
+      const result = (await pending) as { signature?: string; via?: string; error?: string }
+      if (result.error) throw new Error(`sign: provider rejected or failed — ${result.error}`)
+      if (!result.signature) throw new Error('sign: no signature returned')
+
+      const recovered = await recoverMessageAddress({
+        message: { raw: hexMessage },
+        signature: result.signature as `0x${string}`,
+      })
+
+      const ok = recovered.toLowerCase() === account.toLowerCase()
+      verdict(
+        'sign',
+        ok ? 'pass' : 'fail',
+        `recovered=${recovered}, account=${account}, via=${result.via}, chain=${CHAIN}`,
+      )
+    })
+  })
+
+  test('reject', async ({ page, context, extensionId }) => {
+    await runCell('reject', async () => {
+      await page.goto('/')
+      await dismissAnalyticsPrompt(page)
+      await connect.connectWalletButton(page).click()
+      await page.getByRole('button', { name: /rabby/i }).first().click()
+
+      await rabby.rejectConnection(context, extensionId)
+
+      const stillDisconnected = await connect
+        .connectWalletButton(page)
+        .waitFor({ state: 'visible', timeout: 15_000 })
+        .then(() => true)
+        .catch(() => false)
+      verdict('reject', stillDisconnected ? 'pass' : 'fail', `chain=${CHAIN}`)
+    })
+  })
+
+  test('reconnect', async ({ page, context, extensionId }) => {
+    await runCell('reconnect', async () => {
+      await connectWallet(page, context, extensionId)
+      await connect.accountChip(page).waitFor({ state: 'visible', timeout: 30_000 })
+      const before = await authorisedAccount(page)
+
+      await page.reload({ waitUntil: 'domcontentloaded' })
+      await dismissAnalyticsPrompt(page)
+
+      // Chip-first, never isVisible(). Two identical MetaMask CI runs once
+      // disagreed (restored vs dropped) because isVisible() ignores its timeout
+      // and returns a point-in-time answer during wagmi's rehydration.
+      const restored = await connect
+        .accountChip(page)
+        .waitFor({ state: 'visible', timeout: 30_000 })
+        .then(() => true)
+        .catch(() => false)
+
+      let outcome: 'restored' | 'dropped' | 'unknown'
+      if (restored) {
+        outcome = 'restored'
+      } else if (await connect.connectWalletButton(page).isVisible().catch(() => false)) {
+        outcome = 'dropped'
+      } else {
+        outcome = 'unknown'
+      }
+
+      await capture(page, 'rabby reconnect — after reload')
+
+      if (outcome === 'unknown') {
+        throw new Error(`reconnect: neither chip nor connect CTA within 30s (before=${before})`)
+      }
+
+      const after = outcome === 'restored' ? await authorisedAccount(page) : null
+      const ok = outcome === 'restored' && !!before && before === after
+      verdict(
+        'reconnect',
+        ok ? 'pass' : 'fail',
+        `outcome=${outcome}, before=${before}, after=${after}, chain=${CHAIN}`,
+      )
+    })
+  })
+})

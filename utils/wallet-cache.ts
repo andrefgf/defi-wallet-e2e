@@ -1,5 +1,6 @@
 import fs from 'node:fs'
 import path from 'node:path'
+import crypto from 'node:crypto'
 import type { Page } from '@playwright/test'
 
 /**
@@ -69,6 +70,27 @@ export function rabbyExtensionPath(): string {
     }
   }
   throw new Error(`Rabby not found at ${base}. Run: pnpm run fetch:rabby`)
+}
+
+/**
+ * The cached Rabby profile for the current burner + build.
+ *
+ * Keyed on seed + password + extension version, so changing any of them yields
+ * a different profile and a stale cache can never outlive its inputs. Only the
+ * hash reaches disk — never the secret.
+ */
+export function rabbyProfilePath(): string {
+  const seed = process.env.RABBY_SEED_PHRASE
+  const password = process.env.RABBY_WALLET_PASSWORD
+  if (!seed || !password) {
+    throw new Error('RABBY_SEED_PHRASE and RABBY_WALLET_PASSWORD must be set (see .env.example)')
+  }
+  const hash = crypto
+    .createHash('sha256')
+    .update(`${seed}::${password}::${RABBY_VERSION}`)
+    .digest('hex')
+    .slice(0, 16)
+  return path.join(CACHE_DIR, `rabby-profile-${hash}`)
 }
 
 /** Chromium args to load a specific unpacked extension. */

@@ -153,26 +153,38 @@ export async function importWallet(
     throw new Error(`Rabby showed ${count} word inputs, need ${words.length}`)
   }
 
-  for (let i = 0; i < words.length; i++) {
-    await boxes.nth(i).fill(words[i] ?? '')
+  /**
+   * Enter all twelve words, focusing each box first.
+   *
+   * The `click()` and the `fill('')` are NOT ceremony. The verified probe run
+   * did exactly this; a "tidied" version that just called `fill(word)` on each
+   * box failed to advance even with a 9s settle. Rabby's grid appears to want
+   * focus before it registers a value, so match the sequence that is known to
+   * work rather than the one that reads more nicely.
+   */
+  async function enterSeed(): Promise<void> {
+    for (let i = 0; i < words.length; i++) {
+      const box = boxes.nth(i)
+      await box.click()
+      await box.fill('')
+      await box.fill(words[i] ?? '')
+    }
   }
 
-  // Let the debounced validation finish (see the note above), then advance.
-  // Retry once: the settle is empirical, and a machine under load may need
-  // longer than the one it was measured on.
-  await page.waitForTimeout(SEED_VALIDATION_SETTLE_MS)
-  await clickLabel(page, /^next$/i)
+  const onPasswordRoute = () => page.url().includes(RABBY_ROUTES.setPassword.slice(1))
 
-  const reachedPassword = await page
-    .waitForURL((url) => url.hash.includes(RABBY_ROUTES.setPassword.slice(1)), { timeout: 15_000 })
-    .then(() => true)
-    .catch(() => false)
-
-  if (!reachedPassword) {
-    await page.waitForTimeout(SEED_VALIDATION_SETTLE_MS * 2)
+  // The probe only advanced on its SECOND pass over the grid, so a single
+  // attempt is not the verified path — two are. Enter, settle, click; if we're
+  // still here, re-enter, settle longer, click again.
+  for (const settle of [SEED_VALIDATION_SETTLE_MS, SEED_VALIDATION_SETTLE_MS * 2]) {
+    await enterSeed()
+    await page.waitForTimeout(settle)
     await clickLabel(page, /^next$/i)
-    await waitForRoute(page, RABBY_ROUTES.setPassword)
+    await page.waitForTimeout(2000)
+    if (onPasswordRoute()) break
   }
+
+  await waitForRoute(page, RABBY_ROUTES.setPassword)
 
   // These two placeholders are the only real selector handles in the whole
   // flow — everything else is a label. Verified against 0.93.100.
@@ -180,13 +192,21 @@ export async function importWallet(
   await page.getByPlaceholder(/confirm password/i).fill(password)
   await clickLabel(page, /^confirm$/i)
 
+  // Reaching the success route IS the import. Everything past this point is
+  // navigation, not wallet state.
   await waitForRoute(page, RABBY_ROUTES.success, 60_000)
-  await clickLabel(page, /open wallet/i)
 
-  // The dashboard is the proof the vault actually persisted. Its action row —
-  // Swap / Send / Bridge / Receive — is stable and only renders with a wallet.
-  await page
-    .getByRole('button', { name: /^(swap|send|receive)$/i })
-    .first()
-    .waitFor({ state: 'visible', timeout: 30_000 })
+  // "Open Wallet" is BEST EFFORT and deliberately not awaited for a result.
+  //
+  // The probe stopped at this screen and never pressed it, so what it does —
+  // navigate in place, open the popup, close the tab — is unmeasured. An
+  // earlier version waited for the dashboard on this same page afterwards and
+  // timed out at 30s. Do not assert on unprobed behaviour; that is the third
+  // time this pattern has cost a run.
+  await clickLabel(page, /open wallet/i, 10_000).catch(() => {})
+
+  // Give Rabby time to flush the vault to disk. The builder verifies
+  // persistence properly by reopening the profile in a fresh context, which is
+  // a stronger check than anything we can do from inside this tab.
+  await page.waitForTimeout(5000)
 }

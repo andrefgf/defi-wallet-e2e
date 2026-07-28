@@ -449,3 +449,50 @@ than typing 12 words at 30ms/char — with one retry at double the settle, since
 the value is empirical and a loaded machine may need longer. The settle is
 load-bearing and commented as such; there is no signal to poll for, because the
 button never reflects validity.
+
+---
+
+## 2026-07-27 (Mon) — Rabby cache built; lock + approval surfaces probed
+
+`pnpm run build:cache:rabby` → **built and verified**, profile reopened LOCKED
+(vault present). Burner address `0xe59c45...706010`.
+
+### Three failures getting there, all the same mistake
+Each came from extending a verified path instead of porting it exactly:
+
+1. `fill()` without the preceding `click()` — the probe focused each box first.
+2. One pass over the seed grid — the probe only advanced on its **second**.
+3. Waiting for the dashboard after "Open Wallet" — **the probe never pressed
+   that button.** Everything past it was inference wearing the probe's
+   credibility.
+
+Rule, now written down: a probe is evidence for exactly what it did. Port the
+sequence, get it green, simplify only afterwards.
+
+### Verified by scripts/probe-rabby-approval.ts
+
+**Lock screen** — `index.html#/unlock`
+- `input[placeholder="Enter the Password to Unlock"]`
+- buttons: "Unlock with biometrics", "Unlock", "Forgot Password?"
+- **Enter submits**, which sidesteps choosing between Unlock and biometrics
+- unlocks to `index.html#/dashboard`
+
+**Approval** — `notification.html#/approval`
+- heading "Connect to Dapp", origin, chain, "Listed by", "Site popularity"
+- buttons: **"Connect"** / **"Cancel"**
+- Rabby opens this page **itself**; it appeared unrequested as a 4th page
+
+**Rabby defaults the connect approval to Ethereum**, not Base Sepolia — so the
+add/switch-network follow-up is required for Aave, exactly as with MetaMask.
+
+### notification.html was never broken
+It self-closes with nothing pending. Three earlier probes recorded "target
+closed" and I read it as a defect. The consequence is a real API difference:
+MetaMask lets you pre-open `notification.html` and wait; **Rabby does not** —
+you must wait for Rabby to open it. `getNotificationPage` differs accordingly.
+
+### Still UNVERIFIED in utils/rabby-actions.ts
+Transaction and signature approvals. No probe has driven a signature through
+Rabby yet. `CONFIRM_LABELS` therefore carries "Sign" and "Confirm" as
+candidates from the shipped locale file, flagged in-comment. Prune the list once
+a real signature has been observed — do not assume it.
