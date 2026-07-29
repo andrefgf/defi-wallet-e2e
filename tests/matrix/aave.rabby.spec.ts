@@ -157,7 +157,9 @@ async function ensureNetwork(
   // Base Sepolia, so the chain already exists and this is a plain switch. It
   // stays as the safety net for a stale cache.
   await rabby.approveChainDialog(context, extensionId, BASE_SEPOLIA.chainId)
-  await request
+  // BOUNDED — see rabby-actions.withTimeout. An unbounded await here is what
+  // killed CI #11 at the 60-minute job ceiling.
+  await rabby.withTimeout(request, 20_000, 'timed out')
 
   const deadline = Date.now() + 45_000
   while (Date.now() < deadline) {
@@ -189,6 +191,16 @@ async function connectWallet(page: Page, context: import('@playwright/test').Bro
   // Approving the connection is NOT the end of the handshake — see ensureNetwork.
   await ensureNetwork(page, context, extensionId)
 }
+
+/**
+ * NO RETRIES on matrix cells.
+ *
+ * A cell verdict is a measurement, not a flaky assertion. Retrying a `blocked`
+ * cell doubles the runtime and produces the same answer — and in CI #11 that
+ * doubling is what turned a slow run into a 60-minute job kill. If a cell is
+ * unstable, that instability IS the finding and belongs in the notes.
+ */
+test.describe.configure({ retries: 0 })
 
 test.describe('Matrix — Aave × Rabby', () => {
   test('connect', async ({ page, context, extensionId }) => {

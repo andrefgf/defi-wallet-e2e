@@ -65,7 +65,14 @@ export async function ensureNetwork(
     .catch(() => {})
 
   await mm.approveFollowUpRequests(context, extensionId)
-  await request
+
+  // BOUNDED. `request` settles only once MetaMask's prompt is answered, so if
+  // the approval is ever missed this await blocks forever — Playwright puts no
+  // timeout on a promise returned from `evaluate`. That is exactly how CI #11
+  // died on the Rabby path (killed at the 60-minute job ceiling, no artifacts).
+  // It has never bitten here because MetaMask's approval always lands, but the
+  // latent hang is identical and one selector change away.
+  await Promise.race([request, new Promise((r) => setTimeout(r, 20_000))])
 
   const deadline = Date.now() + 60_000
   while (Date.now() < deadline) {

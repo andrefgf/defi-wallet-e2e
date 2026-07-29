@@ -17,6 +17,24 @@ import type { BrowserContext, Page } from '@playwright/test'
 
 const NOTIFICATION = 'notification.html'
 
+/**
+ * Never await a wallet promise without a ceiling.
+ *
+ * `provider.request(...)` for anything needing approval settles ONLY when a
+ * human (or us) answers the dialog. If the approval is missed, the promise
+ * hangs forever — and `page.evaluate` puts no timeout on a returned promise.
+ *
+ * CI run #11 died exactly here: the add-chain dialog wasn't matched, `await add`
+ * blocked, and the job was killed at the 60-minute ceiling with no artifacts and
+ * no logs. Every provider promise the harness awaits goes through this.
+ */
+export function withTimeout<T>(promise: Promise<T>, ms: number, fallback: T): Promise<T> {
+  return Promise.race([
+    promise,
+    new Promise<T>((resolve) => setTimeout(() => resolve(fallback), ms)),
+  ])
+}
+
 /** VERIFIED: `input[placeholder="Enter the Password to Unlock"]` at #/unlock. */
 const UNLOCK_PLACEHOLDER = /enter the password to unlock/i
 

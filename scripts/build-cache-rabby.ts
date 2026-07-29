@@ -5,7 +5,7 @@ import crypto from 'node:crypto'
 import 'dotenv/config'
 import { rabbyExtensionPath, browserArgsFor, CACHE_DIR, RABBY_VERSION } from '../utils/wallet-cache'
 import { importWallet, openOnboarding } from '../utils/rabby-onboarding'
-import { approveChainDialog } from '../utils/rabby-actions'
+import { approveChainDialog, withTimeout } from '../utils/rabby-actions'
 import { BASE_SEPOLIA, addChainParams } from '../utils/networks'
 
 /**
@@ -123,7 +123,14 @@ async function main() {
         .catch(() => 'evaluate failed')
 
       const approved = await approveChainDialog(context, id, BASE_SEPOLIA.chainId)
-      console.log(`  add-chain dialog approved: ${approved} (${await add})`)
+      // BOUNDED. `add` only settles once the dialog is answered; if we missed it
+      // this would block forever and take the whole job down (CI #11).
+      const addResult = await withTimeout(add, 20_000, 'timed out waiting for the provider')
+      console.log(`  add-chain dialog approved: ${approved} (${addResult})`)
+
+      if (!approved) {
+        console.log('  ⚠ Base Sepolia was NOT pre-provisioned — specs will have to add it mid-run')
+      }
       await neutral.waitForTimeout(3000)
       await neutral.close().catch(() => {})
     } finally {
