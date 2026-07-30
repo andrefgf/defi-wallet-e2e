@@ -207,19 +207,56 @@ test.describe('Matrix — Aave × Rabby', () => {
     await runCell('connect', async () => {
       await connectWallet(page, context, extensionId)
 
-      await connect.accountChip(page).waitFor({ state: 'visible', timeout: 30_000 })
-
+      // MEASURE THE PROVIDER FIRST, then the dApp. Order matters.
+      //
+      // The earlier version waited on the account chip and THREW when it never
+      // appeared, so every run recorded `blocked` — "we couldn't measure". That
+      // was wrong. We *can* measure: if the provider reports an authorised
+      // account on the correct chain and Aave still shows no account, that is a
+      // real, measured divergence between wallet and dApp, and `fail` is the
+      // honest verdict. `blocked` would be hiding a finding behind a harness
+      // complaint.
       const account = await authorisedAccount(page)
-      const chip = await connect.accountChip(page).innerText().catch(() => '')
-      const ok = !!account && chipMatches(chip, account)
-      verdict('connect', ok ? 'pass' : 'fail', `chip="${chip}", account=${account}, chain=${CHAIN}`)
+      const chainId = await currentChainId(page)
+
+      const chipAppeared = await connect
+        .accountChip(page)
+        .waitFor({ state: 'visible', timeout: 30_000 })
+        .then(() => true)
+        .catch(() => false)
+
+      const chip = chipAppeared
+        ? await connect.accountChip(page).innerText().catch(() => '')
+        : ''
+
+      await capture(page, 'rabby connect — final dApp state')
+
+      if (!account) {
+        // No authorised account at all — the connect genuinely did not happen.
+        throw new Error(`connect: provider reports no authorised account (chain=${chainId})`)
+      }
+
+      const ok = chipAppeared && chipMatches(chip, account)
+      verdict(
+        'connect',
+        ok ? 'pass' : 'fail',
+        ok
+          ? `chip="${chip}", account=${account}, chain=${CHAIN}`
+          : `WALLET AUTHORISED BUT DAPP SHOWS NO ACCOUNT — provider account=${account}, ` +
+            `chainId=${chainId} (expected ${BASE_SEPOLIA.chainIdHex}), chipVisible=${chipAppeared}, chain=${CHAIN}`,
+      )
     })
   })
 
   test('sign', async ({ page, context, extensionId }) => {
     await runCell('sign', async () => {
       await connectWallet(page, context, extensionId)
-      await connect.accountChip(page).waitFor({ state: 'visible', timeout: 30_000 })
+      // Chip is not a precondition for signing — the provider is. Don't block a
+      // measurable cell on the dApp's UI.
+      await connect
+        .accountChip(page)
+        .waitFor({ state: 'visible', timeout: 15_000 })
+        .catch(() => {})
 
       const account = await authorisedAccount(page)
       if (!account) throw new Error('sign: no authorised account after connect')
@@ -294,7 +331,10 @@ test.describe('Matrix — Aave × Rabby', () => {
   test('reconnect', async ({ page, context, extensionId }) => {
     await runCell('reconnect', async () => {
       await connectWallet(page, context, extensionId)
-      await connect.accountChip(page).waitFor({ state: 'visible', timeout: 30_000 })
+      await connect
+        .accountChip(page)
+        .waitFor({ state: 'visible', timeout: 15_000 })
+        .catch(() => {})
       const before = await authorisedAccount(page)
 
       await page.reload({ waitUntil: 'domcontentloaded' })
