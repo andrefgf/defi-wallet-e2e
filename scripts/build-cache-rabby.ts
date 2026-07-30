@@ -5,7 +5,7 @@ import crypto from 'node:crypto'
 import 'dotenv/config'
 import { rabbyExtensionPath, browserArgsFor, CACHE_DIR, RABBY_VERSION } from '../utils/wallet-cache'
 import { importWallet, openOnboarding } from '../utils/rabby-onboarding'
-import { approveChainDialog, withTimeout } from '../utils/rabby-actions'
+import { approveChainDialog, connectToDapp, withTimeout } from '../utils/rabby-actions'
 import { BASE_SEPOLIA, addChainParams } from '../utils/networks'
 
 /**
@@ -98,6 +98,37 @@ async function main() {
       await neutral
         .goto('https://example.com', { waitUntil: 'domcontentloaded', timeout: 30_000 })
         .catch(() => {})
+      await neutral.waitForTimeout(2000)
+
+      // CONNECT FIRST. Wallets don't honour chain-management RPCs from an
+      // origin they aren't connected to — the 29 Jul run fired
+      // wallet_addEthereumChain at example.com cold, Rabby raised no dialog at
+      // all, and the whole thing timed out with "NOT pre-provisioned".
+      // eth_requestAccounts is what gets us an authorised origin.
+      console.log('  connecting the neutral page first...')
+      const connectReq = neutral
+        .evaluate(
+          `(() => {
+            var chosen = null
+            window.addEventListener('eip6963:announceProvider', function (e) {
+              if (e.detail && e.detail.info && e.detail.info.rdns === 'io.rabby') chosen = e.detail.provider
+            })
+            window.dispatchEvent(new Event('eip6963:requestProvider'))
+            return new Promise(function (resolve) {
+              setTimeout(function () {
+                var p = chosen || window.ethereum
+                if (!p) { resolve('no provider'); return }
+                p.request({ method: 'eth_requestAccounts' })
+                  .then(function (a) { resolve('connected: ' + JSON.stringify(a)) })
+                  .catch(function (e) { resolve('rejected: ' + (e && e.message)) })
+              }, 1000)
+            })
+          })()`,
+        )
+        .catch(() => 'evaluate failed')
+
+      await connectToDapp(context, id).catch(() => {})
+      console.log(`  ${await withTimeout(connectReq, 25_000, 'connect timed out')}`)
       await neutral.waitForTimeout(2000)
 
       const add = neutral

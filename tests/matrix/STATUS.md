@@ -562,3 +562,84 @@ is published.
 ### Also worth noting
 Rabby ships **82 chains, all mainnets**. No Base Sepolia. Every testnet is a
 "custom network" with that warning attached.
+
+---
+
+## 2026-07-29 (Wed) — the Rabby connect blocker, finally seen
+
+Six failed attempts, each a genuinely different cause. Worth listing, because the
+list *is* the finding:
+
+| # | Symptom | Actual cause |
+|---|---|---|
+| CI 9 | chain `0x1` | Rabby authorises on Ethereum; no switch driven by us |
+| CI 10 | chain `0xa869` | `/^add$/i` missing from CONFIRM_LABELS; then we approved **Aave's** Avalanche Fuji dialog instead of ours |
+| CI 11 | job killed at 60m | unbounded `await` on a provider promise that only settles when a dialog is answered |
+| CI 12 | chain `0xa869` | chain-ID guard read `input.first()` = **Network name**, not Chain ID (Rabby renders Chain ID as read-only text); and treated an unpainted dialog as "not a chain dialog" and approved it blind |
+| local | "NOT pre-provisioned" | fired `wallet_addEthereumChain` at an origin Rabby was **not connected to** |
+| local | "Already processing connect" | `clickFirstLabel` awaited the full timeout **per label** — 7 labels × 15s = up to 105s, so the connect approval was never clicked in budget |
+
+### And the one a log could never show
+
+Rabby **disables** the Connect button and displays *"Please process the alert
+before signing"* with an **Ignore all** link whenever the origin is unrecognised
+(`Listed by: None`). `clickFirstLabel` was finding the button, reading
+`isEnabled() === false`, and correctly skipping it — forever.
+
+**It took a screenshot to see this.** Six log-driven iterations could not have
+found it, because nothing was erroring; a disabled button is a silent state.
+
+Fixed with `dismissSecurityAlert()`, called at the top of every confirm poll.
+This is Rabby's counterpart to MetaMask's Blockaid gate, already handled in
+`metamask-actions.dismissSecurityAlert()`.
+
+### Genuinely publishable: both wallets gate approval behind an alert
+MetaMask's Blockaid flags Aave's *testnet* contracts as malicious and swaps
+Confirm for "Review alert". Rabby flags *unlisted origins* and disables Connect
+until "Ignore all" is clicked. Same class of gate, different trigger, different
+mechanics, and **both are invisible to a mocked provider** — a stub has no
+reputation service and no alert to clear. That belongs in the matrix write-up.
+
+### Cost, stated plainly
+The Rabby column has taken roughly 6× the MetaMask column. That is not thrash:
+Rabby ships **zero** test hooks, treats every testnet as an unverifiable custom
+network, and gates approval behind a security acknowledgement. Those three facts
+are the honest answer to "how testable is this wallet", and they are worth more
+published than a fourth green tick.
+
+### RESOLVED 2026-07-29 — eight iterations
+
+```
+[rabby] cleared a security alert gating the primary button
+connected: ["0xe59c45fb2835a60487632d3146ac9306bb706010"]
+[rabby] approved chain dialog for 84532: true
+add-chain dialog approved: true (ok)
+```
+
+Base Sepolia is now present in the cached Rabby profile before any spec runs, so
+`ensureNetwork` should be a fast no-op and Aave's Avalanche Fuji request has
+nothing to race.
+
+**The final fix was reading BOTH `innerText` AND every `<input>` value.** I got
+this field wrong twice in opposite directions — first reading
+`input.first().inputValue()` (that's the Network name), then scanning `innerText`
+(which excludes input values, hence `saw ?`). Rabby renders Chain ID inside an
+input. Matching against the union of text and input values is what I should have
+written instead of picking a side and defending it.
+
+### The three fixes that actually mattered, in order of subtlety
+1. **`clickFirstLabel` awaited the full timeout per label** — 7 labels × 15s, so
+   the approval was never clicked inside any sane budget. Now one deadline for
+   all candidates.
+2. **The origin has to be connected before chain RPCs are honoured.**
+   `wallet_addEthereumChain` fired at a cold origin raised no dialog at all.
+3. **Rabby disables the primary button behind a security alert** for unrecognised
+   origins. Silent — a disabled button doesn't error, so no log revealed it. Only
+   a screenshot did.
+
+### Method note worth keeping
+Six of the eight iterations were driven by logs and each found a real but
+non-decisive bug. The two that broke the deadlock came from **looking at a
+screenshot** and from **printing the raw evidence** (`inputs=[...]`) instead of
+inferring. When a state is silent rather than erroring, instrumentation has to
+show the state, not the error.

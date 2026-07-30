@@ -63,24 +63,81 @@ const CONFIRM_LABELS = [
 ]
 const CANCEL_LABELS = [/^cancel$/i, /^reject$/i]
 
-/** Click the first label that is present and enabled. */
-async function clickFirstLabel(page: Page, labels: RegExp[], timeoutMs = 8000): Promise<boolean> {
-  for (const label of labels) {
-    const button = page.getByRole('button', { name: label }).first()
-    const visible = await button
-      .waitFor({ state: 'visible', timeout: timeoutMs })
-      .then(() => true)
-      .catch(() => false)
-    if (!visible) continue
-    if (!(await button.isEnabled().catch(() => false))) continue
-    if (
-      await button
-        .click({ timeout: 8000 })
-        .then(() => true)
-        .catch(() => false)
-    ) {
-      return true
+/**
+ * Click the first of `labels` that is present and enabled.
+ *
+ * POLLS ACROSS ALL LABELS AGAINST ONE DEADLINE. The previous version awaited
+ * `waitFor(timeout)` per label in sequence, so with 7 confirm labels a 15s
+ * timeout became up to 105s of waiting before giving up. On 29 Jul that blew
+ * past the 25s bound on the connect step, the approval was never clicked, and
+ * Rabby then rejected the follow-up with "Already processing connect. Please
+ * wait." — a symptom two steps removed from the actual cause.
+ *
+ * Total cost is now `timeoutMs`, whatever the number of candidate labels.
+ */
+/**
+ * Clear Rabby's security alert, if it's gating the primary button.
+ *
+ * Rabby DISABLES Connect and shows *"Please process the alert before signing"*
+ * with an **Ignore all** link whenever it doesn't recognise the origin
+ * (`Listed by: None`, orange shield). A test that just polls for an enabled
+ * Connect button waits forever — which is precisely what happened on
+ * example.com on 29 Jul, and no log line revealed it. It took a screenshot.
+ *
+ * This is Rabby's counterpart to MetaMask's Blockaid gate, which
+ * `metamask-actions.dismissSecurityAlert()` already handles. Both wallets block
+ * approval behind an acknowledgement; the wording and mechanics differ.
+ *
+ * ⚠️ Test-only, on a testnet, with a burner. Do NOT copy this pattern anywhere
+ * near mainnet — there the alert may well be telling the truth.
+ */
+async function dismissSecurityAlert(page: Page): Promise<boolean> {
+  for (const label of [/ignore all/i, /^ignore$/i, /^proceed$/i]) {
+    const link = page.getByRole('button', { name: label }).first()
+    const alt = page.getByText(label).first()
+    for (const target of [link, alt]) {
+      if (await target.isVisible().catch(() => false)) {
+        if (
+          await target
+            .click({ timeout: 4000 })
+            .then(() => true)
+            .catch(() => false)
+        ) {
+          console.log('  [rabby] cleared a security alert gating the primary button')
+          await new Promise((r) => setTimeout(r, 1200))
+          return true
+        }
+      }
     }
+  }
+  return false
+}
+
+async function clickFirstLabel(page: Page, labels: RegExp[], timeoutMs = 8000): Promise<boolean> {
+  const deadline = Date.now() + timeoutMs
+
+  while (Date.now() < deadline) {
+    // If the primary control is disabled behind an alert, clear it first —
+    // otherwise every poll below sees `isEnabled() === false` and skips.
+    await dismissSecurityAlert(page).catch(() => false)
+
+    for (const label of labels) {
+      const button = page.getByRole('button', { name: label }).first()
+      const usable =
+        (await button.isVisible().catch(() => false)) &&
+        (await button.isEnabled().catch(() => false))
+      if (!usable) continue
+
+      if (
+        await button
+          .click({ timeout: 5000 })
+          .then(() => true)
+          .catch(() => false)
+      ) {
+        return true
+      }
+    }
+    await new Promise((r) => setTimeout(r, 400))
   }
   return false
 }
@@ -169,32 +226,66 @@ export async function approveChainDialog(
     )
     if (!page) return false
 
-    const body = await page.evaluate(`document.body ? document.body.innerText : ''`).catch(() => '')
-    const text = String(body)
+    // Wait for the dialog to actually PAINT before reading it. Rabby renders an
+    // empty shell first; reading too early returned '' and the old code treated
+    // "unreadable" as "not a chain dialog" and approved it blind. That is how
+    // CI #12 still landed on Fuji despite this guard existing.
+    let text = ''
+    const paintDeadline = Date.now() + 12_000
+    while (Date.now() < paintDeadline) {
+      text = String(
+        await page.evaluate(`document.body ? document.body.innerText : ''`).catch(() => ''),
+      ).trim()
+      if (text.length > 0) break
+      await new Promise((r) => setTimeout(r, 500))
+    }
 
-    // Not a chain dialog at all (e.g. a leftover connect prompt) — approve it
-    // and move on; it isn't the thing we're guarding against.
-    if (!/custom network|chain id/i.test(text)) {
+    if (!text) {
+      // FAIL SAFE. Never approve something we could not read.
+      console.log('  [rabby] dialog never painted — declining rather than approving blind')
+      await clickFirstLabel(page, CANCEL_LABELS, 8000)
+      await new Promise((r) => setTimeout(r, 1500))
+      continue
+    }
+
+    const isChainDialog = /custom network|chain id/i.test(text)
+    if (!isChainDialog) {
       await clickFirstLabel(page, CONFIRM_LABELS, 8000)
       await new Promise((r) => setTimeout(r, 1500))
       continue
     }
 
-    const offered = await page
+    // Search BOTH the rendered text AND every input value.
+    //
+    // Two failed attempts here, in opposite directions. First I read
+    // `input.first().inputValue()` — wrong field (it's the Network name).
+    // Then I scanned `innerText` — which excludes input values, so the run
+    // logged `saw ?`, finding no digits at all. The Chain ID lives in an
+    // `<input>`, so neither approach alone can see it.
+    //
+    // Read everything and match against the union. Immune to which fields
+    // Rabby happens to render as inputs in any given version.
+    const values = await page
       .locator('input')
-      .first()
-      .inputValue()
-      .catch(() => '')
-    const matches = offered.trim() === String(expectedChainIdDec)
+      .evaluateAll((els) => els.map((e) => (e as HTMLInputElement).value).filter(Boolean))
+      .catch(() => [] as string[])
+
+    const haystack = [text, ...values].join(' | ')
+    const wanted = String(expectedChainIdDec)
+    const matches = new RegExp(`(^|[^0-9])${wanted}([^0-9]|$)`).test(haystack)
 
     if (matches) {
       const ok = await clickFirstLabel(page, [/^add$/i, /^confirm$/i, /^switch/i], 8000)
-      if (ok) return true
-      return false
+      console.log(`  [rabby] approved chain dialog for ${wanted}: ${ok}`)
+      return ok
     }
 
-    // Wrong chain — refuse it. This is Aave's Fuji request, not ours.
-    console.log(`  [rabby] declining chain dialog offering ${offered || '?'}, want ${expectedChainIdDec}`)
+    // Wrong chain — refuse it. This is Aave's Avalanche Fuji request, not ours.
+    // Log the full evidence: if this declines wrongly again, the reason is here
+    // rather than another round of guessing.
+    const seen = haystack.match(/\b\d{3,7}\b/)?.[0] ?? '?'
+    console.log(`  [rabby] declining chain dialog (saw ${seen}, want ${wanted})`)
+    console.log(`  [rabby] inputs=${JSON.stringify(values)}`)
     await clickFirstLabel(page, CANCEL_LABELS, 8000)
     await new Promise((r) => setTimeout(r, 2000))
   }
