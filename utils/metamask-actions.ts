@@ -1,4 +1,10 @@
 import type { BrowserContext, Page } from '@playwright/test'
+import {
+  readChainDialog,
+  decideChainDialog,
+  logChainVerdict,
+  TARGET_CHAIN_ID,
+} from './chain-policy'
 import fs from 'node:fs'
 
 /**
@@ -345,6 +351,7 @@ async function resolveRequest(
   extensionId: string,
   kind: 'confirm' | 'cancel',
   timeoutMs?: number,
+  expectedChainIdDec: number = TARGET_CHAIN_ID,
 ): Promise<void> {
   const page = await getNotificationPage(context, extensionId, timeoutMs)
   const button = actionButton(page, kind)
@@ -390,6 +397,49 @@ async function resolveRequest(
         return
       }
       continue
+    }
+
+    // CHAIN GUARD — the fix for the measurement bias that got a cell retracted.
+    //
+    // This loop walks MetaMask's multi-step flow, and one of those steps can be
+    // a network add/switch the DAPP asked for, not us. This function used to
+    // approve it without looking, while the Rabby path refused any chain that
+    // wasn't the one under test. Aave requests Avalanche Fuji during connect on
+    // its Base Sepolia market, so the two columns diverged on the dApp's
+    // behaviour and the difference was written down as a difference between the
+    // wallets. Same policy for every wallet now — see utils/chain-policy.ts.
+    //
+    // PLACEMENT IS LOad-BEARING, and getting it wrong cost a full local run.
+    //
+    // The first version of this guard sat at the TOP of the loop, before the
+    // button wait. MetaMask routinely paints a blank notification page while it
+    // boots — there is an entire `waitUntilRendered` helper about it — so the
+    // guard read an empty document, applied the "never approve what you cannot
+    // read" rule, and CANCELLED the request. All four MetaMask cells came back
+    // blocked, two of them logging `dialog never painted`. The policy was right;
+    // it was being asked about a page that had not loaded yet.
+    //
+    // Here, `appeared` has already resolved, so a confirm button is visible and
+    // the document has definitely rendered. Now "unreadable" means genuinely
+    // anomalous rather than merely early, and declining it is safe.
+    if (kind === 'confirm') {
+      const reading = await readChainDialog(page, 6000)
+      const verdict = decideChainDialog(reading, expectedChainIdDec)
+      logChainVerdict('metamask', verdict, reading)
+
+      if (verdict.decision === 'decline') {
+        // Refuse THIS screen without abandoning the flow. A rejected network
+        // switch is a legitimate outcome to measure, not a harness failure —
+        // what the dApp does next is precisely what the matrix records.
+        await actionButton(page, 'cancel').click({ timeout: 8000 }).catch(() => {})
+        await page.waitForTimeout(1500).catch(() => {})
+        if (page.isClosed()) return
+        if (!(await showsRequest(page))) {
+          await page.close().catch(() => {})
+          return
+        }
+        continue
+      }
     }
 
     const enabled = await button.isEnabled().catch(() => false)

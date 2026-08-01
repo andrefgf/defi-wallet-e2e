@@ -643,3 +643,179 @@ non-decisive bug. The two that broke the deadlock came from **looking at a
 screenshot** and from **printing the raw evidence** (`inputs=[...]`) instead of
 inferring. When a state is silent rather than erroring, instrumentation has to
 show the state, not the error.
+
+---
+
+## 2026-07-30 — narrowing the Rabby `connect` divergence (probe:rabby:event)
+
+Purpose: decide WHICH LAYER drops the connection, before naming any vendor.
+Hypotheses: A wallet emits nothing · B emits late/wrong · C dApp mishandles ·
+D we and Aave hold different provider objects.
+
+### Run 1 — crashed, but not uninformative
+`SAME_OBJECT: false`. Died on a 30s timeout clicking "Connect wallet".
+
+Cause was ours: `helpers.dismissAnalyticsPrompt` gates on `isVisible()`, which
+ignores its timeout. Consent overlay unpainted → not dismissed → click landed on
+the overlay. **Same defect already recorded as fixed on the reconnect cell.**
+Fixing a bug is not fixing every instance of it. Both now use `waitFor`.
+
+Resisted concluding D from `SAME_OBJECT: false`. Different object identity is
+ordinary — a wallet may announce a wrapper over the same transport. D requires
+the objects to DISAGREE, which run 1 never measured.
+
+### Run 2 — D ruled out
+Both providers: identical accounts, identical chain, identical fingerprints
+(`ctor: "N"`, 51 keys, same flags). Two wrappers, one state.
+
+Crashed again — profile was already authorised for app.aave.com, so the page
+loaded connected with the chip rendered and there was no button to click. That
+is the reconnect path, which already passes. Added `ensureDisconnected`:
+disconnect via Aave's own menu + clear wagmi storage, deliberately leaving
+Rabby's site permission intact.
+
+Noted: chip rendered **on chain 0x1**. CI #14 had the correct chain and no chip.
+
+### Run 3 — A and B ruled out; wagmi has the connection
+Cold connect. Events:
+
+    +6101ms [rdns]   accountsChanged ["0xe59c45…706010"]
+    +6101ms [legacy] accountsChanged ["0xe59c45…706010"]
+
+Prompt, correct payload, on both providers. **A dead, B dead.**
+
+    wagmi.store = {"connections":{...[["10d89c4209a",{
+      "accounts":["0xE59c45Fb…706010"],
+      "chainId":1,
+      "connector":{"id":"io.rabby","name":"Rabby Wallet","type":"inject…
+
+wagmi holds the account and resolved the connector as `io.rabby`. Chip: **false**.
+
+Only `accountsChanged` fired — no EIP-1193 `connect` event. wagmi got the data
+regardless, so this is a note, not the cause.
+
+**NOT YET C.** `chainId: 1` — the wallet is on Ethereum mainnet while the market
+is Base Sepolia. CI #14 failed with the wallet correctly on `0x14a34`. "No chip
+on the wrong network" may be Aave behaving correctly, and matching it to CI #14
+would be a false match. The probe skips the `ensureNetwork` step the spec runs.
+
+### Run 4 (pending) — reproduce CI conditions
+Added step 4b: `wallet_addEthereumChain` → `approveChainDialog` → poll until
+`0x14a34` → re-measure. Decides between:
+
+- chip appears on Base Sepolia → **NOT REPRODUCED**; CI #14 differs for another
+  reason (headless / timing / cold profile). Notify nobody.
+- chip still absent, wagmi holds account on chainId 84532 → **C**. Notify Aave
+  primary. Check `aave/interface`'s wagmi version first — "wagmi has it" is not
+  "Aave mishandled it"; the defect could be in wagmi.
+
+### Harness defect found along the way (matters for publication)
+`aave.rabby.spec.ts :: authorisedAccount` read `window.ethereum`, not the `rdns`
+provider — contradicting the file header, its own docblock, and METHODOLOGY §1.
+The sign and reconnect cells called it too.
+
+Nothing failed. No test went red. The address was probably even correct. The
+**label** was false: CI #14's note says `provider account=…` for a value read
+from the legacy slot. With `SAME_OBJECT: false` on this dApp, "which provider
+did you ask" stops being a detail. Now reads both and records disagreement.
+
+### Runs 5 & 6 — the answer, and the retraction
+
+Controlled A/B on the SAME probe, wallet starting on 0x14a34 both times. Only
+the chain-dialog policy differed.
+
+| | Aave's Fuji request | wallet ends | wagmi | chip |
+|---|---|---|---|---|
+| default (chain-checked) | **declined** | `0x14a34` ✓ | `connections:[]`, `current:null` | **false** |
+| `APPROVE_ANY_CHAIN=1`   | **approved** | `0xa869` ✗ Fuji | 1 conn, `io.rabby`, chainId 43113 | **true** |
+
+The chip renders ONLY when the wallet complies and moves to Avalanche Fuji.
+Decline, and wagmi destroys the connection — no wrong-network state, no
+recovery. Dialog fields captured verbatim:
+
+    [rabby] inputs=["43113","Avalanche Fuji",
+                    "https://api.avax-test.network/ext/bc/C/rpc","AVAX",...]
+
+### Why the Rabby `connect` cell is RETRACTED (fail → blocked)
+
+`metamask-actions.approveFollowUpRequests` → `resolveRequest(…,'confirm',…)`.
+No chain check. Blind approve.
+`rabby-actions.approveChainDialog` → declines anything that isn't 84532.
+Added by us after CI #10 landed on 0xa869.
+
+Same dApp, same behaviour, two harness policies, two verdicts — and the
+difference got written down as a difference between the WALLETS. It survived a
+CI run, a green suite, and a written cell note. Found only because the probe
+printed the dApp's own dialog contents.
+
+**The MetaMask `connect` pass is now flagged too.** It may have approved the
+Fuji switch before the chip was asserted, i.e. the chip may have rendered while
+the wallet was on the wrong network — the cell never records the chain at the
+moment it reads the chip. Not retracted (not shown wrong), not trusted (not
+shown right). Asymmetry contaminates both columns; only one looked broken.
+
+Rule now standing: **any harness policy that can change a verdict must be
+identical across every column.** A per-wallet safety rule is a per-wallet
+measurement bias.
+
+### Open confound — do NOT notify Aave yet
+
+`proto_base_sepolia_v3` is a valid market name (Aave's own testnet faucet uses
+it), so the URL is not the problem. But this profile is long-lived, and a stale
+market/chain in its storage would produce the same request. "Aave requests the
+wrong chain" and "our profile remembered the wrong chain" are both live.
+
+The storage dump was filtered to /wagmi|wallet|connect|recent/ — which would
+have hidden the key holding the answer. Now dumps everything.
+
+NEXT: clean-profile run. If Fuji is requested on a fresh profile, it is a
+dApp-level finding, wallet-independent, and goes to `aave/interface` under the
+10-working-day policy.
+
+### Run 7 — CLEAN PROFILE. Confound ruled out, cause identified.
+
+`.wallet-cache/rabby` deleted, `build:cache:rabby` re-run, fresh profile.
+Teardown reported `already disconnected` — no prior session existed.
+
+Aave still requested **Avalanche Fuji (43113)** on the Base Sepolia market.
+Identical dialog fields. So it is not stale profile state.
+
+The full (unfiltered) storage dump gives the cause:
+
+    cbwsdk.store … "metadata":{"appName":"Aave",
+      "appChainIds":[43113,84532,421614,534351,11155111,11155420]}
+    wagmi.store  … {"connections":[],"chainId":43113,"current":null}
+    testnetsEnabled = true
+
+**43113 is the FIRST entry in Aave's own testnet chain list. 84532 is second.**
+On a profile with zero history, wagmi's default chain is already 43113 before
+any connection exists. `?marketName=proto_base_sepolia_v3` selects the displayed
+market (UI confirmed "Base Market V3") but does NOT set the connector's chain.
+
+Filtering the storage dump to /wagmi|wallet|connect|recent/ would have hidden
+`cbwsdk.store` — the key holding the answer. Worth remembering.
+
+### The finding, stated at the strength the evidence supports
+
+CERTAIN (reproduced clean, dialog captured verbatim):
+1. With the Base Sepolia market selected, connecting triggers a wallet request
+   to switch to Avalanche Fuji.
+2. Declining that request leaves wagmi with `connections:[]`, `current:null` —
+   the established connection is destroyed. No wrong-network state, no error,
+   no recovery short of a reload.
+
+INTERPRETATION (Aave's call, not ours):
+3. Whether a single wagmi default chain is intended design. Plausibly yes.
+   Point 2 is the part that is hard to defend, and it is where the issue should
+   lead. Point 1 is the trigger, not the accusation.
+
+Maps exactly onto the matrix's `reject` thesis: a user rejecting a prompt should
+land in a handled state, not a destroyed one. This is that, in a shipped dApp,
+found only because a real wallet could actually say no.
+
+### Harness change still owed
+
+Both wallet paths must use the SAME chain-dialog policy. Until then neither
+`connect` cell is trustworthy. Expected consequence once symmetric: MetaMask and
+Rabby BOTH show no chip on Aave Base Sepolia under the safe policy, and both
+cells carry the same dApp-level note. That is the truthful matrix.

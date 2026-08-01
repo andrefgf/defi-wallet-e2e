@@ -76,6 +76,19 @@ function chipMatches(chipText: string, account: string): boolean {
   return acc.startsWith(head) && acc.endsWith(tail)
 }
 
+/**
+ * NO RETRIES ON MATRIX CELLS — and this must match every other wallet column.
+ *
+ * playwright.config sets `retries: CI ? 1 : 0`. The Rabby spec overrode that to
+ * 0; this one did not. So in CI a MetaMask cell got a second attempt and a Rabby
+ * cell got one — two different measurement regimes, recorded side by side in the
+ * same table as if they were comparable.
+ *
+ * A cell verdict is a measurement, not a flaky assertion. If a cell is unstable,
+ * that instability IS the finding and belongs in the notes.
+ */
+test.describe.configure({ retries: 0 })
+
 test.describe('Matrix — Aave × MetaMask', () => {
   test('connect', async ({ page, context, extensionId }) => {
     await runCell('connect', async () => {

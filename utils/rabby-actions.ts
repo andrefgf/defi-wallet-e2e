@@ -1,4 +1,10 @@
 import type { BrowserContext, Page } from '@playwright/test'
+import {
+  readChainDialog,
+  decideChainDialog,
+  logChainVerdict,
+  TARGET_CHAIN_ID,
+} from './chain-policy'
 
 /**
  * Rabby notification-popup actions — the Rabby half of `metamask-actions.ts`.
@@ -211,13 +217,18 @@ export async function getNotificationPage(
  * wallet ended up on `0xa869` — a *different* wrong network from the `0x1` it
  * started on. Progress, but still wrong.
  *
- * So: read the Chain ID out of the form. Approve on a match, CANCEL on a
- * mismatch, and keep looking. Never approve a chain dialog blind again.
+ * The reading and the decision now live in `chain-policy.ts`, shared with every
+ * other wallet. They used to live here, and ONLY here — MetaMask approved
+ * whatever appeared — which meant the two columns applied different policies to
+ * the same dApp request and the difference was recorded as a difference between
+ * the wallets. See the header of that file.
+ *
+ * What stays here is the clicking, which is legitimately Rabby-specific.
  */
 export async function approveChainDialog(
   context: BrowserContext,
   extensionId: string,
-  expectedChainIdDec: number,
+  expectedChainIdDec: number = TARGET_CHAIN_ID,
   attempts = 4,
 ): Promise<boolean> {
   for (let i = 0; i < attempts; i++) {
@@ -226,66 +237,23 @@ export async function approveChainDialog(
     )
     if (!page) return false
 
-    // Wait for the dialog to actually PAINT before reading it. Rabby renders an
-    // empty shell first; reading too early returned '' and the old code treated
-    // "unreadable" as "not a chain dialog" and approved it blind. That is how
-    // CI #12 still landed on Fuji despite this guard existing.
-    let text = ''
-    const paintDeadline = Date.now() + 12_000
-    while (Date.now() < paintDeadline) {
-      text = String(
-        await page.evaluate(`document.body ? document.body.innerText : ''`).catch(() => ''),
-      ).trim()
-      if (text.length > 0) break
-      await new Promise((r) => setTimeout(r, 500))
+    const reading = await readChainDialog(page)
+    const verdict = decideChainDialog(reading, expectedChainIdDec)
+    logChainVerdict('rabby', verdict, reading)
+
+    if (verdict.decision === 'approve') {
+      const ok = await clickFirstLabel(page, [/^add$/i, /^confirm$/i, /^switch/i], 8000)
+      console.log(`  [rabby] approved chain dialog for ${expectedChainIdDec}: ${ok}`)
+      return ok
     }
 
-    if (!text) {
-      // FAIL SAFE. Never approve something we could not read.
-      console.log('  [rabby] dialog never painted — declining rather than approving blind')
-      await clickFirstLabel(page, CANCEL_LABELS, 8000)
-      await new Promise((r) => setTimeout(r, 1500))
-      continue
-    }
-
-    const isChainDialog = /custom network|chain id/i.test(text)
-    if (!isChainDialog) {
+    if (verdict.decision === 'not-a-chain-dialog') {
       await clickFirstLabel(page, CONFIRM_LABELS, 8000)
       await new Promise((r) => setTimeout(r, 1500))
       continue
     }
 
-    // Search BOTH the rendered text AND every input value.
-    //
-    // Two failed attempts here, in opposite directions. First I read
-    // `input.first().inputValue()` — wrong field (it's the Network name).
-    // Then I scanned `innerText` — which excludes input values, so the run
-    // logged `saw ?`, finding no digits at all. The Chain ID lives in an
-    // `<input>`, so neither approach alone can see it.
-    //
-    // Read everything and match against the union. Immune to which fields
-    // Rabby happens to render as inputs in any given version.
-    const values = await page
-      .locator('input')
-      .evaluateAll((els) => els.map((e) => (e as HTMLInputElement).value).filter(Boolean))
-      .catch(() => [] as string[])
-
-    const haystack = [text, ...values].join(' | ')
-    const wanted = String(expectedChainIdDec)
-    const matches = new RegExp(`(^|[^0-9])${wanted}([^0-9]|$)`).test(haystack)
-
-    if (matches) {
-      const ok = await clickFirstLabel(page, [/^add$/i, /^confirm$/i, /^switch/i], 8000)
-      console.log(`  [rabby] approved chain dialog for ${wanted}: ${ok}`)
-      return ok
-    }
-
-    // Wrong chain — refuse it. This is Aave's Avalanche Fuji request, not ours.
-    // Log the full evidence: if this declines wrongly again, the reason is here
-    // rather than another round of guessing.
-    const seen = haystack.match(/\b\d{3,7}\b/)?.[0] ?? '?'
-    console.log(`  [rabby] declining chain dialog (saw ${seen}, want ${wanted})`)
-    console.log(`  [rabby] inputs=${JSON.stringify(values)}`)
+    // decline — wrong chain, or unreadable. Refuse and keep looking.
     await clickFirstLabel(page, CANCEL_LABELS, 8000)
     await new Promise((r) => setTimeout(r, 2000))
   }
@@ -336,6 +304,27 @@ export async function approveFollowUpRequests(
       .then((p) => p)
       .catch(() => null)
     if (!page) break
+
+    // CHAIN GUARD. `CONFIRM_LABELS` contains /^add$/i and /^switch/i, so without
+    // this check a follow-up prompt offering ANY network would be approved —
+    // the exact mirror of the MetaMask defect that got a cell retracted, sitting
+    // in the file that was supposed to be the careful one.
+    //
+    // Fixing a policy in the function you were looking at is not fixing the
+    // policy. Grep for the behaviour, not the symbol.
+    // Full paint budget on every iteration, not a shrinking one. A 4s budget on
+    // later prompts risks reading a page that is merely slow and declining a
+    // legitimate request — the same mistake that cost a full MetaMask run when
+    // its guard was asked about an unpainted page.
+    const reading = await readChainDialog(page, 12_000)
+    const verdict = decideChainDialog(reading)
+    logChainVerdict('rabby', verdict, reading)
+
+    if (verdict.decision === 'decline') {
+      await clickFirstLabel(page, CANCEL_LABELS, 8000)
+      await new Promise((resolve) => setTimeout(resolve, 2000))
+      continue
+    }
 
     if (!(await clickFirstLabel(page, CONFIRM_LABELS, 8000))) break
     approved += 1

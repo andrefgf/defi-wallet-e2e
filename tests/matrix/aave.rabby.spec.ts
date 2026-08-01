@@ -51,18 +51,61 @@ function verdict(flow: string, result: 'pass' | 'fail', detail: string): void {
   console.log(`MATRIX: Aave/Rabby/${flow} = ${result} (${detail})`)
 }
 
-/** Account the EIP-6963 provider is authorised for — read from it, not the DOM. */
-async function authorisedAccount(page: Page): Promise<string | null> {
+/**
+ * Account the EIP-6963 provider is authorised for — read from it, not the DOM.
+ *
+ * FIXED 2026-07-30. This function read `window.ethereum` while its own docblock,
+ * the file header, and `matrix/METHODOLOGY.md` §1 all state that verdicts are
+ * read from the provider whose `rdns` matches the wallet under test. Every
+ * other resolver in this file (`currentChainId`, `ensureNetwork`, the sign
+ * cell) already did the rdns dance; this one did not.
+ *
+ * It went unnoticed while the two happened to agree. `probe-rabby-connect-event`
+ * then reported `SAME_OBJECT: false` on app.aave.com — the announced provider
+ * and the legacy slot are DIFFERENT objects — at which point "which one did we
+ * ask" stops being a detail and becomes the whole question. The CI #14 `fail`
+ * note quoted an account read from the legacy slot and labelled it "provider
+ * account", which is a claim the harness had not actually measured.
+ *
+ * Returns both, so a divergence is recorded rather than silently resolved.
+ */
+async function authorisedAccounts(
+  page: Page,
+): Promise<{ rdns: string | null; legacy: string | null }> {
   return page
     .evaluate(
-      `(() => {
-        var eth = window.ethereum
-        if (!eth) return null
-        return eth.request({ method: 'eth_accounts' }).then(function (a) { return (a && a[0]) || null })
-      })()`,
+      `(() => new Promise(function (resolve) {
+        var chosen = null
+        window.addEventListener('eip6963:announceProvider', function (e) {
+          if (e.detail && e.detail.info && e.detail.info.rdns === ${JSON.stringify(RDNS)}) chosen = e.detail.provider
+        })
+        window.dispatchEvent(new Event('eip6963:requestProvider'))
+        setTimeout(function () {
+          function first(p) {
+            if (!p) return Promise.resolve(null)
+            return p.request({ method: 'eth_accounts' })
+              .then(function (a) { return (a && a[0]) || null })
+              .catch(function () { return null })
+          }
+          Promise.all([first(chosen), first(window.ethereum)]).then(function (r) {
+            resolve({ rdns: r[0], legacy: r[1] })
+          })
+        }, 800)
+      }))()`,
     )
-    .then((v) => (v as string | null) ?? null)
-    .catch(() => null)
+    .then((v) => (v as { rdns: string | null; legacy: string | null }) ?? { rdns: null, legacy: null })
+    .catch(() => ({ rdns: null, legacy: null }))
+}
+
+/**
+ * The account, from the provider the matrix says it measures.
+ *
+ * The sign and reconnect cells call this. They were reading `window.ethereum`
+ * too, via the old implementation — so this wrapper is not sugar, it is the fix
+ * arriving at three more call sites.
+ */
+async function authorisedAccount(page: Page): Promise<string | null> {
+  return (await authorisedAccounts(page)).rdns
 }
 
 /** Does the dApp's truncated chip (0xb1…c171, head length varies) refer to `account`? */
@@ -216,7 +259,8 @@ test.describe('Matrix — Aave × Rabby', () => {
       // real, measured divergence between wallet and dApp, and `fail` is the
       // honest verdict. `blocked` would be hiding a finding behind a harness
       // complaint.
-      const account = await authorisedAccount(page)
+      const accounts = await authorisedAccounts(page)
+      const account = accounts.rdns
       const chainId = await currentChainId(page)
 
       const chipAppeared = await connect
@@ -231,9 +275,20 @@ test.describe('Matrix — Aave × Rabby', () => {
 
       await capture(page, 'rabby connect — final dApp state')
 
+      // Do the two providers agree? On app.aave.com they are different objects
+      // (probe-rabby-connect-event, 2026-07-30). If they also report different
+      // accounts, the story is provider identity — not the wallet, not the dApp
+      // — and any note naming a vendor would be wrong. Record it either way.
+      const divergent = accounts.rdns !== accounts.legacy
+      const providers =
+        `rdns[${RDNS}]=${accounts.rdns ?? 'none'}, window.ethereum=${accounts.legacy ?? 'none'}` +
+        (divergent ? ' — PROVIDERS DISAGREE' : '')
+
       if (!account) {
-        // No authorised account at all — the connect genuinely did not happen.
-        throw new Error(`connect: provider reports no authorised account (chain=${chainId})`)
+        // No authorised account on the provider we actually selected.
+        throw new Error(
+          `connect: ${RDNS} provider reports no authorised account (${providers}, chain=${chainId})`,
+        )
       }
 
       const ok = chipAppeared && chipMatches(chip, account)
@@ -241,8 +296,8 @@ test.describe('Matrix — Aave × Rabby', () => {
         'connect',
         ok ? 'pass' : 'fail',
         ok
-          ? `chip="${chip}", account=${account}, chain=${CHAIN}`
-          : `WALLET AUTHORISED BUT DAPP SHOWS NO ACCOUNT — provider account=${account}, ` +
+          ? `chip="${chip}", account=${account}, ${providers}, chain=${CHAIN}`
+          : `WALLET AUTHORISED BUT DAPP SHOWS NO ACCOUNT — ${providers}, ` +
             `chainId=${chainId} (expected ${BASE_SEPOLIA.chainIdHex}), chipVisible=${chipAppeared}, chain=${CHAIN}`,
       )
     })
