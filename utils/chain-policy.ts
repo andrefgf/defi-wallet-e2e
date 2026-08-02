@@ -88,12 +88,22 @@ export async function readChainDialog(
   page: Page,
   paintTimeoutMs = 12_000,
 ): Promise<ChainDialogReading> {
+  // LOCATOR-BASED READS ONLY — not page.evaluate().
+  //
+  // MetaMask's LavaMoat sandbox blocks page-context JavaScript evaluation on
+  // notification pages. page.evaluate() catches the error and returns '', which
+  // makes every call look like an empty (unpainted) page — so readChainDialog
+  // always returned `painted: false`, decideChainDialog always returned
+  // 'decline', and resolveRequest clicked CANCEL on legitimate connection
+  // requests. The reject cell passed (it never enters the chain guard); every
+  // confirm cell blocked with "MetaMask never showed a pending request".
+  //
+  // Playwright's locator methods (innerText, inputValue, count) run through the
+  // CDP protocol and are not intercepted by LavaMoat.
   let text = ''
   const deadline = Date.now() + paintTimeoutMs
   while (Date.now() < deadline) {
-    text = String(
-      await page.evaluate(`document.body ? document.body.innerText : ''`).catch(() => ''),
-    ).trim()
+    text = (await page.locator('body').innerText().catch(() => '')).trim()
     if (text.length > 0) break
     await new Promise((r) => setTimeout(r, 500))
   }
@@ -108,10 +118,16 @@ export async function readChainDialog(
   // the Network *name*. Reading `innerText` alone excludes input values, and the
   // Chain ID lives in an `<input>` — so that run logged `saw ?`, having found no
   // digits anywhere. Neither source alone can see the field. Match the union.
-  const inputs = await page
-    .locator('input')
-    .evaluateAll((els) => els.map((e) => (e as HTMLInputElement).value).filter(Boolean))
-    .catch(() => [] as string[])
+  //
+  // locator.inputValue() also runs via CDP protocol, not page.evaluate, so it
+  // is safe from LavaMoat interception.
+  const inputLocator = page.locator('input')
+  const inputCount = await inputLocator.count().catch(() => 0)
+  const inputs: string[] = []
+  for (let i = 0; i < inputCount; i++) {
+    const val = await inputLocator.nth(i).inputValue().catch(() => '')
+    if (val) inputs.push(val)
+  }
 
   const haystack = [text, ...inputs].join(' | ')
 

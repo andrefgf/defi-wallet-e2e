@@ -255,13 +255,29 @@ export async function getNotificationPage(
   // Give MetaMask a beat to register the request the dApp just fired.
   await new Promise((resolve) => setTimeout(resolve, 2000))
 
-  // Headed: MetaMask opens the popup window itself. Scan briefly for the
-  // window — but once it EXISTS, commit to it patiently instead of racing it.
-  // The old code gave a found-but-still-booting popup only one aggressive
-  // render attempt inside a 5s window, then fell through and opened a SECOND
-  // notification.html next to it. Two racing notification UIs on a slow
-  // machine is how "Requesting Connection" hangs forever.
-  const popupDeadline = Date.now() + 5000
+  // Headed: MetaMask opens the popup window itself. Wait for it PATIENTLY —
+  // and once it EXISTS, commit to it instead of racing it. Two hard-won rules:
+  //
+  //  * The old code gave a found-but-still-booting popup only one aggressive
+  //    render attempt inside a 5s window, then fell through and opened a SECOND
+  //    notification.html next to it. Two racing notification UIs on a slow
+  //    machine is how "Requesting Connection" hangs forever.
+  //  * 2026-08-01: the SCAN window itself was 5s, and that recreated the same
+  //    race from the other side. Under load (fresh profile copy, Defender,
+  //    Aave booting) MetaMask can take tens of seconds to raise its popup; the
+  //    scan gave up first, opened notification.html, and MetaMask's real popup
+  //    then arrived next to it. Every operation on the doubled-up UI took
+  //    minutes (a 1s waitForTimeout took 166s in the trace), the 90s budget
+  //    died inside one loop iteration, and this function reported "never
+  //    showed a pending request" for a request that was showing in the window
+  //    next door. connect/sign/reconnect all blocked that way; reject passed
+  //    only because its popup happened to beat the 5s scan. So: wait up to 60s
+  //    (bounded by the caller's budget) before concluding no popup is coming.
+  //
+  // Headless: the popup window is NEVER created, so don't scan for it at all —
+  // go straight to opening notification.html ourselves.
+  const headless = !!process.env.HEADLESS
+  const popupDeadline = Date.now() + (headless ? 0 : Math.min(60_000, timeoutMs))
   let popup: Page | undefined
   while (Date.now() < popupDeadline && !popup) {
     popup = context.pages().find((p) => p.url().startsWith(url))
