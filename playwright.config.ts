@@ -42,11 +42,19 @@ export default defineConfig({
     // localStorage flag set by the fixture (see fixtures/metamask.ts).
     baseURL: process.env.DAPP_URL ?? 'https://app.aave.com/?marketName=proto_base_sepolia_v3',
 
-    // Always on, not just on failure. These specs ARE the deliverable: a record
-    // of a real wallet driving a real DeFi protocol. The trace carries a DOM
-    // snapshot for every action, so `pnpm run report` lets you scrub the whole
-    // user journey — connect, sign, supply, borrow — step by step.
-    trace: 'on',
+    // In CI: always on, not just on failure. These specs ARE the deliverable —
+    // a record of a real wallet driving a real DeFi protocol. The trace carries
+    // a DOM snapshot for every action, so `pnpm run report` lets you scrub the
+    // whole user journey — connect, sign, supply, borrow — step by step.
+    //
+    // Locally: only kept for failures. A full trace snapshots the DOM on EVERY
+    // action, and against a real MetaMask plus Aave over a 20-minute run that
+    // memory pressure is enough to get Chrome to reap MetaMask's MV3 service
+    // worker — which returns LOCKED and strands the pending request. That is
+    // not a theory: on 2026-07-26 the same commit went all-red locally and
+    // all-green in CI, with the laptop screenshots showing the lock screen.
+    // CI has the headroom; a laptop does not.
+    trace: process.env.CI ? 'on' : 'retain-on-failure',
     screenshot: 'on',
 
     // `video` is deliberately NOT set here: it has no effect on the persistent

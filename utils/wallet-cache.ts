@@ -1,5 +1,6 @@
 import fs from 'node:fs'
 import path from 'node:path'
+import crypto from 'node:crypto'
 import type { Page } from '@playwright/test'
 
 /**
@@ -33,8 +34,71 @@ export function walletProfilePath(hash: string): string {
  * own. Set HEADLESS=true to run without a visible browser (what CI does).
  */
 export function browserArgs(): string[] {
-  const ext = metamaskExtensionPath()
-  const args = [`--disable-extensions-except=${ext}`, `--load-extension=${ext}`]
+  return browserArgsFor(metamaskExtensionPath())
+}
+
+// --- second wallet: Rabby -----------------------------------------------------
+//
+// Deliberately ADDITIVE rather than a refactor of the MetaMask helpers above.
+// The MetaMask column is green (CI run #8, 4/4) and a Sunday-night rewrite of
+// shared plumbing is the cheapest possible way to lose that. Once Rabby's cells
+// are also green, the two can be collapsed into one wallet-parameterised module
+// with the tests standing behind the change.
+
+export const RABBY_VERSION = process.env.RABBY_VERSION ?? '0.93.100'
+
+/**
+ * Path to the unpacked Rabby extension.
+ *
+ * Unlike MetaMask's archive, Rabby's is not guaranteed flat — `fetch-rabby.mjs`
+ * resolves manifest.json at the root or one level down, so mirror that here
+ * rather than assuming.
+ */
+export function rabbyExtensionPath(): string {
+  const base = path.join(CACHE_DIR, `rabby-chrome-${RABBY_VERSION}`)
+  if (fs.existsSync(path.join(base, 'manifest.json'))) return base
+
+  if (fs.existsSync(base)) {
+    for (const entry of fs.readdirSync(base)) {
+      const nested = path.join(base, entry)
+      if (
+        fs.statSync(nested).isDirectory() &&
+        fs.existsSync(path.join(nested, 'manifest.json'))
+      ) {
+        return nested
+      }
+    }
+  }
+  throw new Error(`Rabby not found at ${base}. Run: pnpm run fetch:rabby`)
+}
+
+/**
+ * The cached Rabby profile for the current burner + build.
+ *
+ * Keyed on seed + password + extension version, so changing any of them yields
+ * a different profile and a stale cache can never outlive its inputs. Only the
+ * hash reaches disk — never the secret.
+ */
+export function rabbyProfilePath(): string {
+  const seed = process.env.RABBY_SEED_PHRASE
+  const password = process.env.RABBY_WALLET_PASSWORD
+  if (!seed || !password) {
+    throw new Error('RABBY_SEED_PHRASE and RABBY_WALLET_PASSWORD must be set (see .env.example)')
+  }
+  const hash = crypto
+    .createHash('sha256')
+    .update(`${seed}::${password}::${RABBY_VERSION}`)
+    .digest('hex')
+    .slice(0, 16)
+  return path.join(CACHE_DIR, `rabby-profile-${hash}`)
+}
+
+/** Chromium args to load a specific unpacked extension. */
+export function browserArgsFor(extensionPath: string): string[] {
+  const args = [
+    `--disable-extensions-except=${extensionPath}`,
+    `--load-extension=${extensionPath}`,
+  ]
   if (process.env.HEADLESS) args.push('--headless=new')
   return args
 }

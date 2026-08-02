@@ -25,6 +25,10 @@ jobs:
       HEADLESS: "true"
       SEED_PHRASE: ${{ secrets.SEED_PHRASE }}
       WALLET_PASSWORD: ${{ secrets.WALLET_PASSWORD }}
+      # Rabby uses its OWN burner, deliberately separate from SEED_PHRASE, so
+      # matrix work can never touch the funded wallet the lending suite spends.
+      RABBY_SEED_PHRASE: ${{ secrets.RABBY_SEED_PHRASE }}
+      RABBY_WALLET_PASSWORD: ${{ secrets.RABBY_WALLET_PASSWORD }}
       DAPP_URL: https://app.aave.com/?marketName=proto_base_sepolia_v3
 
     steps:
@@ -33,7 +37,7 @@ jobs:
       - name: Check required secrets are configured
         run: |
           missing=0
-          for name in SEED_PHRASE WALLET_PASSWORD; do
+          for name in SEED_PHRASE WALLET_PASSWORD RABBY_SEED_PHRASE RABBY_WALLET_PASSWORD; do
             if [ -z "${!name}" ]; then
               echo "::error::Repository secret $name is not set."
               missing=1
@@ -63,6 +67,13 @@ jobs:
           key: metamask-${{ runner.os }}-${{ hashFiles('scripts/fetch-metamask.mjs') }}
           restore-keys: metamask-${{ runner.os }}-
 
+      - name: Cache Rabby build
+        uses: actions/cache@v4
+        with:
+          path: .cache-synpress/rabby-chrome-*
+          key: rabby-${{ runner.os }}-${{ hashFiles('scripts/fetch-rabby.mjs') }}
+          restore-keys: rabby-${{ runner.os }}-
+
       - name: Cache Playwright browsers
         uses: actions/cache@v4
         with:
@@ -73,8 +84,14 @@ jobs:
       - name: Install Playwright Chromium + system deps
         run: pnpm exec playwright install --with-deps chromium
 
-      - name: Build wallet cache (headless)
+      - name: Build MetaMask wallet cache (headless)
         run: xvfb-run --auto-servernum pnpm run build:cache:headless
+
+      # Rabby needs its own imported profile before any Rabby cell can run.
+      # Kept as a SEPARATE step so a Rabby onboarding failure is obvious in the
+      # log rather than surfacing later as four mysteriously blocked cells.
+      - name: Build Rabby wallet cache (headless)
+        run: xvfb-run --auto-servernum env HEADLESS=true pnpm run build:cache:rabby
 
       # A failing CELL is a valid data point, not a broken build — so this step
       # must never fail the job. We capture every `MATRIX:` line the spec prints

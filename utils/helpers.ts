@@ -2,6 +2,7 @@ import { expect, test, type BrowserContext, type Page } from '@playwright/test'
 import { connect, dashboard, modal, nav } from './selectors'
 import * as mm from './metamask-actions'
 import { BASE_SEPOLIA, addChainParams } from './networks'
+import { evalChainId, evalAddChain, RDNS } from './provider-eval'
 
 /**
  * Behaviour-level helpers. Specs read as user intent; the DOM lives in
@@ -25,15 +26,22 @@ export async function capture(page: Page, name: string): Promise<void> {
 
 // --- Network ----------------------------------------------------------------
 
-/** Ask the connected wallet which chain it is on (EIP-1193). */
+/**
+ * Ask the connected wallet which chain it is on (EIP-1193).
+ *
+ * FIXED 2026-08-01: this read `window.ethereum`. The Rabby spec's equivalent
+ * resolved by `rdns`, so the two columns were asking different objects the same
+ * question — and on the dApp under test those objects are provably distinct.
+ * Nothing failed, because they agreed; that is not the same as being right.
+ *
+ * This value decides whether `ensureNetwork` believes it is finished, so getting
+ * it from the wrong provider can silently leave a cell measured on a chain the
+ * results file does not name.
+ */
 async function currentChainId(page: Page): Promise<string | null> {
   return page
-    .evaluate(async () => {
-      const eth = (window as unknown as { ethereum?: { request(a: unknown): Promise<string> } })
-        .ethereum
-      if (!eth) return null
-      return eth.request({ method: 'eth_chainId' })
-    })
+    .evaluate(evalChainId(RDNS.metamask))
+    .then((v) => (v as string | null) ?? null)
     .catch(() => null)
 }
 
@@ -56,16 +64,22 @@ export async function ensureNetwork(
 
   // Don't await yet: this promise doesn't settle until the MetaMask prompts it
   // raises are answered, which is what we do next.
-  const request = page
-    .evaluate(async (params) => {
-      const eth = (window as unknown as { ethereum?: { request(a: unknown): Promise<unknown> } })
-        .ethereum
-      await eth?.request({ method: 'wallet_addEthereumChain', params: [params] }).catch(() => {})
-    }, addChainParams())
-    .catch(() => {})
+  //
+  // Fired at the ANNOUNCED provider, not `window.ethereum` — see provider-eval.
+  const request = page.evaluate(evalAddChain(RDNS.metamask, addChainParams())).catch(() => {})
 
+  // Chain-checked, and identical to what the Rabby path does. This used to
+  // blind-approve, which meant it accepted Aave's Avalanche Fuji request while
+  // the Rabby path refused it — the asymmetry that got a cell retracted.
   await mm.approveFollowUpRequests(context, extensionId)
-  await request
+
+  // BOUNDED. `request` settles only once MetaMask's prompt is answered, so if
+  // the approval is ever missed this await blocks forever — Playwright puts no
+  // timeout on a promise returned from `evaluate`. That is exactly how CI #11
+  // died on the Rabby path (killed at the 60-minute job ceiling, no artifacts).
+  // It has never bitten here because MetaMask's approval always lands, but the
+  // latent hang is identical and one selector change away.
+  await Promise.race([request, new Promise((r) => setTimeout(r, 20_000))])
 
   const deadline = Date.now() + 60_000
   while (Date.now() < deadline) {
@@ -90,10 +104,22 @@ export async function expectOnBaseSepolia(page: Page): Promise<void> {
 
 /** Dismiss Aave's first-load analytics consent prompt, if shown. */
 export async function dismissAnalyticsPrompt(page: Page): Promise<void> {
+  // `isVisible()` resolves against the CURRENT DOM and ignores any timeout —
+  // the same defect that made the reconnect cell flip-flop. Here it meant: if
+  // the consent prompt had not painted yet, it returned false, nothing was
+  // dismissed, and the next click landed on the overlay instead of the button.
+  // That is how run 1 of probe-rabby-connect-event died on a 30s timeout
+  // against a "Connect wallet" button that was on screen the whole time.
+  //
+  // Wait for it properly; treat "never appeared" as fine, because it often is.
   const optOut = connect.analyticsOptOut(page)
-  if (await optOut.isVisible().catch(() => false)) {
-    await optOut.click().catch(() => {})
-  }
+  const shown = await optOut
+    .waitFor({ state: 'visible', timeout: 10_000 })
+    .then(() => true)
+    .catch(() => false)
+  if (!shown) return
+  await optOut.click().catch(() => {})
+  await page.waitForTimeout(500)
 }
 
 /**

@@ -2,9 +2,9 @@
   "name": "defi-wallet-e2e",
   "version": "1.0.0",
   "private": true,
-  "description": "End-to-end tests that drive a real MetaMask against live Aave v3 on Base Sepolia — wallet connection, the full lending lifecycle, and failure modes. Playwright + TypeScript.",
+  "description": "End-to-end tests that drive a real MetaMask against live Aave v3 on Base Sepolia \u2014 wallet connection, the full lending lifecycle, and failure modes. Playwright + TypeScript.",
   "type": "module",
-  "author": "André Guerra <https://www.linkedin.com/in/andrefgfrancisco>",
+  "author": "Andr\u00e9 Guerra <https://www.linkedin.com/in/andrefgfrancisco>",
   "license": "MIT",
   "homepage": "https://github.com/andrefgf/defi-wallet-e2e#readme",
   "repository": {
@@ -22,6 +22,11 @@
     "wallet:balance": "tsx scripts/check-balance.ts",
     "mint:tokens": "tsx scripts/mint-test-tokens.ts",
     "fetch:metamask": "node scripts/fetch-metamask.mjs",
+    "fetch:rabby": "node scripts/fetch-rabby.mjs",
+    "probe:rabby": "pnpm run fetch:rabby && tsx scripts/probe-rabby.ts",
+    "build:cache:rabby": "pnpm run fetch:rabby && tsx scripts/build-cache-rabby.ts",
+    "probe:rabby:approval": "tsx scripts/probe-rabby-approval.ts",
+    "probe:rabby:aave": "tsx scripts/probe-rabby-aave.ts",
     "build:cache": "pnpm run fetch:metamask && tsx scripts/build-cache.ts",
     "build:cache:headless": "pnpm run fetch:metamask && cross-env HEADLESS=true tsx scripts/build-cache.ts",
     "test": "cross-env HEADLESS=true playwright test",
@@ -32,7 +37,8 @@
     "test:ui": "playwright test --ui",
     "test:debug": "playwright test --debug",
     "report": "playwright show-report",
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "probe:rabby:event": "tsx scripts/probe-rabby-connect-event.ts"
   },
   "keywords": [
     "e2e",

@@ -150,3 +150,672 @@ CI runs headless and is green; headless is also lighter (no rendering) so the ex
 - Control if unsure: `pnpm test tests/connection.spec.ts` — if that blocks too, it's the machine (close VS Code/other apps; Defender exclusion for repo + %TEMP%\metamask-profile-*).
 
 Do NOT record connect/reconnect until a run earns a verdict. `reject` stands on its own.
+
+---
+
+## 2026-07-26 (Sun) — `sign` cell written, not yet run
+
+Fourth flow added to `aave.metamask.spec.ts`. Written ahead of Tuesday so the
+evening is spent running it, not designing it.
+
+**What gets signed, and why that choice.** Aave exposes no plain `personal_sign`
+in its UI, so the cell fires `personal_sign` directly at the injected provider
+from Aave's origin. The alternative — driving Aave's permit-signature path —
+couples the cell to Aave's supply flow, which the lending suite already covers
+and which would make the *wallet* cell fail whenever the *dApp* changed. The
+cell must measure the wallet.
+
+**Ground truth.** `recoverMessageAddress` (viem) recovers the signer from the
+signature and compares it to the connected account. Per `matrix/flows.md`: not
+"the modal closed", not "a toast appeared".
+
+**The nonce matters.** The message carries an ISO timestamp, so it is new on
+every run. A mocked provider handing back a canned signature recovers to the
+wrong address and the cell reads `fail`. The assertion and the signature share
+no assumption — which is the one thing a mocked suite structurally cannot claim.
+
+**Provider resolved by EIP-6963 `rdns`, not `window.ethereum`.** Today the test
+profile loads only MetaMask, so both agree and this looks like ceremony. It is
+not: on a real browser `window.ethereum` has been observed reporting
+`isMetaMask: true` AND `isOneKey: true` simultaneously. The moment Rabby joins
+the matrix, a cell trusting the legacy slot would silently measure the wrong
+wallet. The verdict line reports which path resolved (`via=`), so a fallback to
+the legacy slot is visible rather than silent.
+
+**Approval budget** is 90s on the first request — MV3 can kill and restart the
+service worker, and it comes back locked.
+
+**Not yet verified:** the sandbox can't typecheck (pnpm symlink store doesn't
+materialise) and can't drive a real wallet. Run `pnpm run typecheck` before the
+first run.
+
+### Also fixed
+`reconnect`'s blocked message claimed "within 45s" while the wait is 30s. Cosmetic,
+but the message is the thing that gets pasted into a diagnosis, so it should be true.
+
+---
+
+## 2026-07-26 (Sun) — local run: 4 red, but the cause is the machine
+
+`pnpm test tests/matrix/aave.metamask.spec.ts` — typecheck clean, all four cells red.
+
+| Cell | Duration | Outcome |
+|---|---|---|
+| connect | 20.0m | test timeout (600s) ×3 |
+| sign | 20.0m | test timeout (600s) ×3 |
+| reject | 59.6s | **printed `pass`**, then timed out in teardown |
+| reconnect | 5.5m | `blocked` — "did not act on confirm after 6 steps" inside `connectToDapp` |
+
+### What the screenshots actually show
+
+- **connect** (`test-failed-4.png`): Aave sitting on **"Requesting Connection — Open the MetaMask browser extension"**. The dApp fired the request and nothing answered.
+- **reconnect** (`test-failed-3.png`): **MetaMask is on the LOCK SCREEN.** Password field empty, Unlock greyed out.
+
+That's the MV3 service-worker death signature — the same one that quarantined
+borrow/repay/withdraw. What's new is that it's now hitting **connect**, at the
+very start of a run, not just a late transaction. The confirm loop then spends
+its six steps hunting for a confirm button on a lock screen.
+
+### Not a code regression
+
+`reject` **printed its verdict and passed.** If the confirm loop or the unlock
+path were fundamentally broken, reject would have died too. The logic is intact;
+the environment starved.
+
+### Aggravator: `trace: 'on'` is back
+
+`playwright.config.ts:49` has `trace: 'on'`, and there's a `trace.zip` in every
+result folder. Tracing snapshots the DOM on **every action** — against a real
+MetaMask plus Aave, over a 20-minute run, that's exactly the memory pressure
+that gets the service worker reaped. Trace was turned **off** once before for
+this precise reason and has drifted back on.
+
+### ⚠️ The sign cell is UNTESTED
+
+`sign` calls `connectWallet` first, and connect never completed. Nothing was
+learned about the new code — not that it works, not that it doesn't. Do not
+record anything for it.
+
+### Decision: verdicts get earned in CI, not on the laptop
+
+`matrix.yml`'s own header already says it — *"CI, where there's enough memory to
+actually drive a real wallet — a laptop OOMs on headed Chromium + MetaMask +
+Aave."* Local runs are for iterating on logic; **a cell is only recorded from a
+CI run.** This has now cost two evenings across two separate sessions. Stop
+paying it.
+
+Consequence for the Rabby work: bring the wallet up locally one cell at a time
+with `--trace off` and `MM_DEBUG=1`, but earn every verdict in CI.
+
+---
+
+## 2026-07-26 (Sun) — CI: 4/4 GREEN. MetaMask column complete.
+
+Matrix run #8, commit `4894869`, manually triggered. **Success, 12m 30s, 4 passed.**
+https://github.com/andrefgf/defi-wallet-e2e/actions/runs/30212701804
+
+```
+connect   = pass  chip="0xb1...c171" == account 0xb1c375ec204f581a4ae3ca04fdbd4292dca1c171
+sign      = pass  recovered=0xB1c375ec...c171, account=0xb1c375ec...c171, via=eip6963
+reconnect = pass  outcome=restored, before == after
+reject    = pass
+```
+
+All four transcribed into `matrix/data/results.csv` with the run URL as evidence.
+**Aave × MetaMask is 4/4 — the first complete column.**
+
+### The sign cell worked on its first real execution
+
+- `via=eip6963` — the provider was resolved by **rdns**, not the legacy
+  `window.ethereum` fallback. That path is now proven, which materially de-risks
+  Rabby: the mechanism for targeting a specific wallet among several works.
+- `recovered` came back EIP-55 checksummed (`0xB1c3…`) against a lowercase
+  `account` (`0xb1c3…`). The case-insensitive comparison handled it. A naive
+  `===` would have reported a **false `fail`** — worth remembering for every
+  future wallet.
+
+### reconnect: flip-flop resolved
+
+`outcome=restored`, same account either side of the reload. The `waitFor` fix
+holds. The two contradictory CI runs from 07-23 were the harness racing, exactly
+as diagnosed — `isVisible()` ignoring its timeout.
+
+### The laptop-vs-CI experiment is now settled
+
+Same spec, same commit, hours apart: **laptop all-red, CI all-green.** That is as
+clean a natural experiment as this project will ever get, and it retires the
+question. Iterate locally; **record only from CI.**
+
+### Note for future runs
+The CI wallet (`0xb1c375…c171`, from the `SEED_PHRASE` secret) is a *different*
+account from the local `.env` wallet (`0xf39f…2266`). Expected, and correct — but
+it means cell notes should always name which account was used, since a reader
+comparing two runs would otherwise see a mismatch and assume a bug.
+
+---
+
+## 2026-07-26 (Sun) — Rabby prep done ahead of Wednesday
+
+Three unknowns closed without touching the harness.
+
+**1. Rabby announces cleanly over EIP-6963 — go.**
+Probe run with five extensions installed together:
+
+| wallet | rdns |
+|---|---|
+| Rabby | **`io.rabby`** |
+| OneKey | `so.onekey.app.wallet` |
+| MetaMask | `io.metamask` |
+| Phantom | `app.phantom` |
+| Brave Wallet | `com.brave.wallet` |
+
+All five announced **synchronously**. `RDNS = 'io.rabby'` is what the Rabby spec targets.
+
+**2. The legacy slot changed owner — a real finding.**
+`window.ethereum` on 2026-07-26 reports `isMetaMask: true` **AND** `isRabby: true`,
+with no `providers` array. On 2026-07-21, before Rabby was installed, the same
+machine reported `isMetaMask: true` and `isOneKey: true`.
+
+Same laptop, same user, five days apart, different answer — because one more
+extension was installed. **Two separate vendors have now been observed claiming
+`isMetaMask` on the legacy slot**, so it isn't a OneKey quirk. Anything detecting
+wallets via `window.ethereum.isMetaMask` is reading install order, not intent.
+
+This retroactively justifies the sign cell resolving by rdns. Had the Rabby cells
+trusted `window.ethereum` they'd have *accidentally* passed — Rabby owns it today —
+while the MetaMask cells would have silently measured Rabby.
+
+**3. Distribution: prebuilt zip, no build-from-source.**
+`Rabby_v0.93.100.zip`, 16.1 MB, released 24 Jul:
+`https://github.com/RabbyHub/Rabby/releases/download/v{VERSION}/Rabby_v{VERSION}.zip`
+
+`scripts/fetch-rabby.mjs` written and wired to `pnpm run fetch:rabby`. Pinned to
+0.93.100 by default (`RABBY_VERSION` overrides) — a floating version makes a cell
+verdict irreproducible, and MetaMask's 13.13.1→13.39.1 testid rename already cost
+us a day. It prints the resolved `manifest.version` so `wallet_version` in
+results.csv can finally be filled.
+
+**Untested:** the download itself. Sandbox DNS blocks github.com. The zip's
+internal layout is therefore unknown, so `findManifestDir()` accepts manifest.json
+at the root *or* one level down and prints which it found. First real run is
+`pnpm run fetch:rabby` on the laptop — that is a download, not a wallet flow, so
+local is fine.
+
+### Still open for Wednesday
+Rabby's **UI actions** — unlock, approve, reject — are the actual work. Nothing
+here shortcuts that. Deliberately did NOT write `aave.rabby.spec.ts` or generalise
+`metamask-actions.ts`: both need Rabby's real selectors, and guessing them is how
+you get a day of debugging a fiction.
+
+---
+
+## 2026-07-26 (Sun) — Rabby import WORKS end to end
+
+`scripts/probe-rabby.ts` drove Rabby 0.93.100 from a fresh profile to an unlocked
+dashboard. Every route and selector below is verified, not inferred.
+
+```
+#/new-user/guide                           "I already have an address"
+#/new-user/import-wallet-type              "Seed Phrase"
+#/new-user/import/seed-or-key              12 masked inputs -> "Next"
+#/new-user/import/seed-phrase/set-password "Password (8 characters min)"
+                                           "Confirm Password" -> "Confirm"
+#/new-user/success?hd=HD%20Key%20Tree      "Open Wallet"
+index.html                                 dashboard: Swap/Send/Bridge/Receive
+```
+
+Written up as `utils/rabby-onboarding.ts`.
+
+### popup.html was never broken
+It failed on three earlier probes with "target closed" — because there was **no
+wallet yet**. Once the vault existed it painted the full dashboard. Same for
+`notification.html`: an approval surface with nothing pending closes itself.
+Three runs were spent treating a normal empty state as a defect.
+
+### The one thing NOT established: why fill() fails
+
+`fill()` populated all twelve boxes — correct DOM values, `Next` enabled — and
+clicking Next did nothing. No navigation, no error text. `pressSequentially`
+immediately afterwards worked.
+
+**Two explanations survive and this run cannot separate them:**
+
+1. The component tracks state via key events and never sees a programmatic value.
+2. It validates asynchronously and the click arrived before validation settled.
+
+André raised (2) unprompted and it fits the evidence exactly as well as (1) —
+typing 12 words at 30ms/char also spends ~3s, so `type()` changed the input
+mechanism **and** the elapsed time. Only one variable should have moved.
+
+**The experiment:** `fill()`, wait 3s, then click.
+- advances -> timing, explanation (2)
+- does not -> input mechanism, explanation (1)
+
+**Do not write "Rabby cannot be driven by fill()" into the matrix until this is
+run.** It would be a published claim about a vendor's product resting on a
+confounded experiment, which is exactly the Safe #8307 mistake.
+
+`rabby-onboarding.ts` uses keystrokes because that satisfies both explanations.
+
+### Rabby vs MetaMask, for the record
+| | MetaMask | Rabby |
+|---|---|---|
+| test hooks | `confirm-btn`, `unlock-password`, … | **none** |
+| approval page | `notification.html` | `notification.html` (same) |
+| full UI | `home.html` | `index.html` |
+| manifest | MV3 | **MV3** |
+| seed entry | grid | 12 masked inputs, keystrokes required |
+
+MV3 on both means the service-worker death that quarantined borrow/repay/withdraw
+is a platform property, not a MetaMask quirk. Expect it here too.
+
+---
+
+## 2026-07-26 (Sun) — RESOLVED: it was timing, not the input mechanism
+
+Controlled three-way run, one variable moved at a time:
+
+```
+A  fill() + click immediately      → did NOT advance
+B  fill() + settle 3s + click      → ADVANCED  ✅
+C  real keystrokes                 → not reached
+```
+
+A and B were identical except the 3s wait — both re-entered the words with
+`fill()` from cleared boxes. Clean isolation.
+
+**`fill()` works. Rabby validates the seed asynchronously (debounced across all
+twelve fields) and `Next` stays enabled the entire time regardless of validity.
+A click landing before validation completes does nothing: no navigation, no
+error, no clue.**
+
+André called this from the UX before any of it was instrumented. The competing
+theory — that Rabby ignores programmatic values and needs real keystrokes — was
+mine, was mechanically plausible, and is **false**.
+
+### Why running the experiment mattered
+"Rabby cannot be driven by `fill()`" was one step from being written into the
+matrix as a published finding about a vendor's product. It would have been
+wrong, and wrong in a way a Rabby engineer could disprove in five minutes. The
+confound was that `type()` changed the input mechanism AND spent ~3s doing it;
+two variables moved, so the earlier run could not distinguish them.
+
+Second time this pattern has appeared (see Safe #8307). The rule holds: when two
+explanations fit, isolate before publishing.
+
+### Consequence for the code
+`utils/rabby-onboarding.ts` uses `fill()` plus a 3s settle — simpler and faster
+than typing 12 words at 30ms/char — with one retry at double the settle, since
+the value is empirical and a loaded machine may need longer. The settle is
+load-bearing and commented as such; there is no signal to poll for, because the
+button never reflects validity.
+
+---
+
+## 2026-07-27 (Mon) — Rabby cache built; lock + approval surfaces probed
+
+`pnpm run build:cache:rabby` → **built and verified**, profile reopened LOCKED
+(vault present). Burner address `0xe59c45...706010`.
+
+### Three failures getting there, all the same mistake
+Each came from extending a verified path instead of porting it exactly:
+
+1. `fill()` without the preceding `click()` — the probe focused each box first.
+2. One pass over the seed grid — the probe only advanced on its **second**.
+3. Waiting for the dashboard after "Open Wallet" — **the probe never pressed
+   that button.** Everything past it was inference wearing the probe's
+   credibility.
+
+Rule, now written down: a probe is evidence for exactly what it did. Port the
+sequence, get it green, simplify only afterwards.
+
+### Verified by scripts/probe-rabby-approval.ts
+
+**Lock screen** — `index.html#/unlock`
+- `input[placeholder="Enter the Password to Unlock"]`
+- buttons: "Unlock with biometrics", "Unlock", "Forgot Password?"
+- **Enter submits**, which sidesteps choosing between Unlock and biometrics
+- unlocks to `index.html#/dashboard`
+
+**Approval** — `notification.html#/approval`
+- heading "Connect to Dapp", origin, chain, "Listed by", "Site popularity"
+- buttons: **"Connect"** / **"Cancel"**
+- Rabby opens this page **itself**; it appeared unrequested as a 4th page
+
+**Rabby defaults the connect approval to Ethereum**, not Base Sepolia — so the
+add/switch-network follow-up is required for Aave, exactly as with MetaMask.
+
+### notification.html was never broken
+It self-closes with nothing pending. Three earlier probes recorded "target
+closed" and I read it as a defect. The consequence is a real API difference:
+MetaMask lets you pre-open `notification.html` and wait; **Rabby does not** —
+you must wait for Rabby to open it. `getNotificationPage` differs accordingly.
+
+### Still UNVERIFIED in utils/rabby-actions.ts
+Transaction and signature approvals. No probe has driven a signature through
+Rabby yet. `CONFIRM_LABELS` therefore carries "Sign" and "Confirm" as
+candidates from the shipped locale file, flagged in-comment. Prune the list once
+a real signature has been observed — do not assume it.
+
+---
+
+## 2026-07-28 (Tue) — CI #9: Rabby/reject PASS, three cells blocked. Cause found.
+
+Run #9 (`e59627d`) **succeeded** — MetaMask still 4/4, no regression from adding
+Rabby, and **Rabby's cache built headless in CI in 1m24s**. Rabby/reject = pass,
+recorded. Matrix is 5/16.
+
+connect, sign and reconnect all blocked on the SAME line: `connect.accountChip`
+never visible.
+
+### Reject passing was the clue
+It proves the whole Rabby harness works: extension loads, profile unlocks, Aave
+lists Rabby, `notification.html#/approval` opens, the click lands, Aave returns
+to its disconnected state. Only the state AFTER approving fails.
+
+### The measurement that settled it
+`scripts/probe-rabby-aave.ts` read the provider rather than the DOM:
+
+```
+accounts: ["0xe59c45...706010"]   chainId: "0x1"
+>>> CONNECTED but on 0x1 — network switch FAILED
+```
+
+Connect works. The wallet is authorised **on Ethereum**.
+
+### And then the screenshot
+Aave's follow-up raised Rabby's **"Add Custom Network to Rabby"** dialog,
+pre-filled with:
+
+```
+Chain ID       43113
+Network name   Avalanche Fuji
+RPC URL        https://api.avax-test.network/ext/bc/C/rpc
+Currency       AVAX
+```
+
+**Aave asked for Avalanche Fuji, not Base Sepolia (84532).** `utils/helpers.ts`
+already documented this — *"Aave lands the wallet on whatever chain it fancies
+(we've watched it add Avalanche Fuji)"* — which is exactly why the MetaMask path
+never trusts Aave's switch and calls `wallet_addEthereumChain` itself.
+
+**My Rabby connect flow didn't.** It relied on Aave's switch, which the repo
+already knew was unreliable. That's the bug, and it was mine.
+
+### Two fixes
+1. **`CONFIRM_LABELS` was missing `/^add$/i`.** Rabby's add-network dialog's
+   primary button is **"Add"**, not Confirm. Even a correct request would not
+   have been approved. `/^switch/i` added alongside it.
+2. **`ensureNetwork()` added to the Rabby spec**, mirroring `helpers.ts`: check
+   the chain, fire `wallet_addEthereumChain` with Base Sepolia params ourselves,
+   approve Rabby's dialog, then poll until the chain actually changes and throw
+   with the observed chainId if it doesn't.
+
+### Side observation, genuinely matrix-relevant
+MetaMask and Rabby receive the *same* `wallet_addEthereumChain` and present it
+very differently. MetaMask shows a standard approval. Rabby shows a form headed
+*"Rabby cannot verify the security of custom networks. Please add trusted
+networks only."* Same request, materially higher friction and a security warning
+on one wallet. Not one of the four flows, but worth writing up when the matrix
+is published.
+
+### Also worth noting
+Rabby ships **82 chains, all mainnets**. No Base Sepolia. Every testnet is a
+"custom network" with that warning attached.
+
+---
+
+## 2026-07-29 (Wed) — the Rabby connect blocker, finally seen
+
+Six failed attempts, each a genuinely different cause. Worth listing, because the
+list *is* the finding:
+
+| # | Symptom | Actual cause |
+|---|---|---|
+| CI 9 | chain `0x1` | Rabby authorises on Ethereum; no switch driven by us |
+| CI 10 | chain `0xa869` | `/^add$/i` missing from CONFIRM_LABELS; then we approved **Aave's** Avalanche Fuji dialog instead of ours |
+| CI 11 | job killed at 60m | unbounded `await` on a provider promise that only settles when a dialog is answered |
+| CI 12 | chain `0xa869` | chain-ID guard read `input.first()` = **Network name**, not Chain ID (Rabby renders Chain ID as read-only text); and treated an unpainted dialog as "not a chain dialog" and approved it blind |
+| local | "NOT pre-provisioned" | fired `wallet_addEthereumChain` at an origin Rabby was **not connected to** |
+| local | "Already processing connect" | `clickFirstLabel` awaited the full timeout **per label** — 7 labels × 15s = up to 105s, so the connect approval was never clicked in budget |
+
+### And the one a log could never show
+
+Rabby **disables** the Connect button and displays *"Please process the alert
+before signing"* with an **Ignore all** link whenever the origin is unrecognised
+(`Listed by: None`). `clickFirstLabel` was finding the button, reading
+`isEnabled() === false`, and correctly skipping it — forever.
+
+**It took a screenshot to see this.** Six log-driven iterations could not have
+found it, because nothing was erroring; a disabled button is a silent state.
+
+Fixed with `dismissSecurityAlert()`, called at the top of every confirm poll.
+This is Rabby's counterpart to MetaMask's Blockaid gate, already handled in
+`metamask-actions.dismissSecurityAlert()`.
+
+### Genuinely publishable: both wallets gate approval behind an alert
+MetaMask's Blockaid flags Aave's *testnet* contracts as malicious and swaps
+Confirm for "Review alert". Rabby flags *unlisted origins* and disables Connect
+until "Ignore all" is clicked. Same class of gate, different trigger, different
+mechanics, and **both are invisible to a mocked provider** — a stub has no
+reputation service and no alert to clear. That belongs in the matrix write-up.
+
+### Cost, stated plainly
+The Rabby column has taken roughly 6× the MetaMask column. That is not thrash:
+Rabby ships **zero** test hooks, treats every testnet as an unverifiable custom
+network, and gates approval behind a security acknowledgement. Those three facts
+are the honest answer to "how testable is this wallet", and they are worth more
+published than a fourth green tick.
+
+### RESOLVED 2026-07-29 — eight iterations
+
+```
+[rabby] cleared a security alert gating the primary button
+connected: ["0xe59c45fb2835a60487632d3146ac9306bb706010"]
+[rabby] approved chain dialog for 84532: true
+add-chain dialog approved: true (ok)
+```
+
+Base Sepolia is now present in the cached Rabby profile before any spec runs, so
+`ensureNetwork` should be a fast no-op and Aave's Avalanche Fuji request has
+nothing to race.
+
+**The final fix was reading BOTH `innerText` AND every `<input>` value.** I got
+this field wrong twice in opposite directions — first reading
+`input.first().inputValue()` (that's the Network name), then scanning `innerText`
+(which excludes input values, hence `saw ?`). Rabby renders Chain ID inside an
+input. Matching against the union of text and input values is what I should have
+written instead of picking a side and defending it.
+
+### The three fixes that actually mattered, in order of subtlety
+1. **`clickFirstLabel` awaited the full timeout per label** — 7 labels × 15s, so
+   the approval was never clicked inside any sane budget. Now one deadline for
+   all candidates.
+2. **The origin has to be connected before chain RPCs are honoured.**
+   `wallet_addEthereumChain` fired at a cold origin raised no dialog at all.
+3. **Rabby disables the primary button behind a security alert** for unrecognised
+   origins. Silent — a disabled button doesn't error, so no log revealed it. Only
+   a screenshot did.
+
+### Method note worth keeping
+Six of the eight iterations were driven by logs and each found a real but
+non-decisive bug. The two that broke the deadlock came from **looking at a
+screenshot** and from **printing the raw evidence** (`inputs=[...]`) instead of
+inferring. When a state is silent rather than erroring, instrumentation has to
+show the state, not the error.
+
+---
+
+## 2026-07-30 — narrowing the Rabby `connect` divergence (probe:rabby:event)
+
+Purpose: decide WHICH LAYER drops the connection, before naming any vendor.
+Hypotheses: A wallet emits nothing · B emits late/wrong · C dApp mishandles ·
+D we and Aave hold different provider objects.
+
+### Run 1 — crashed, but not uninformative
+`SAME_OBJECT: false`. Died on a 30s timeout clicking "Connect wallet".
+
+Cause was ours: `helpers.dismissAnalyticsPrompt` gates on `isVisible()`, which
+ignores its timeout. Consent overlay unpainted → not dismissed → click landed on
+the overlay. **Same defect already recorded as fixed on the reconnect cell.**
+Fixing a bug is not fixing every instance of it. Both now use `waitFor`.
+
+Resisted concluding D from `SAME_OBJECT: false`. Different object identity is
+ordinary — a wallet may announce a wrapper over the same transport. D requires
+the objects to DISAGREE, which run 1 never measured.
+
+### Run 2 — D ruled out
+Both providers: identical accounts, identical chain, identical fingerprints
+(`ctor: "N"`, 51 keys, same flags). Two wrappers, one state.
+
+Crashed again — profile was already authorised for app.aave.com, so the page
+loaded connected with the chip rendered and there was no button to click. That
+is the reconnect path, which already passes. Added `ensureDisconnected`:
+disconnect via Aave's own menu + clear wagmi storage, deliberately leaving
+Rabby's site permission intact.
+
+Noted: chip rendered **on chain 0x1**. CI #14 had the correct chain and no chip.
+
+### Run 3 — A and B ruled out; wagmi has the connection
+Cold connect. Events:
+
+    +6101ms [rdns]   accountsChanged ["0xe59c45…706010"]
+    +6101ms [legacy] accountsChanged ["0xe59c45…706010"]
+
+Prompt, correct payload, on both providers. **A dead, B dead.**
+
+    wagmi.store = {"connections":{...[["10d89c4209a",{
+      "accounts":["0xE59c45Fb…706010"],
+      "chainId":1,
+      "connector":{"id":"io.rabby","name":"Rabby Wallet","type":"inject…
+
+wagmi holds the account and resolved the connector as `io.rabby`. Chip: **false**.
+
+Only `accountsChanged` fired — no EIP-1193 `connect` event. wagmi got the data
+regardless, so this is a note, not the cause.
+
+**NOT YET C.** `chainId: 1` — the wallet is on Ethereum mainnet while the market
+is Base Sepolia. CI #14 failed with the wallet correctly on `0x14a34`. "No chip
+on the wrong network" may be Aave behaving correctly, and matching it to CI #14
+would be a false match. The probe skips the `ensureNetwork` step the spec runs.
+
+### Run 4 (pending) — reproduce CI conditions
+Added step 4b: `wallet_addEthereumChain` → `approveChainDialog` → poll until
+`0x14a34` → re-measure. Decides between:
+
+- chip appears on Base Sepolia → **NOT REPRODUCED**; CI #14 differs for another
+  reason (headless / timing / cold profile). Notify nobody.
+- chip still absent, wagmi holds account on chainId 84532 → **C**. Notify Aave
+  primary. Check `aave/interface`'s wagmi version first — "wagmi has it" is not
+  "Aave mishandled it"; the defect could be in wagmi.
+
+### Harness defect found along the way (matters for publication)
+`aave.rabby.spec.ts :: authorisedAccount` read `window.ethereum`, not the `rdns`
+provider — contradicting the file header, its own docblock, and METHODOLOGY §1.
+The sign and reconnect cells called it too.
+
+Nothing failed. No test went red. The address was probably even correct. The
+**label** was false: CI #14's note says `provider account=…` for a value read
+from the legacy slot. With `SAME_OBJECT: false` on this dApp, "which provider
+did you ask" stops being a detail. Now reads both and records disagreement.
+
+### Runs 5 & 6 — the answer, and the retraction
+
+Controlled A/B on the SAME probe, wallet starting on 0x14a34 both times. Only
+the chain-dialog policy differed.
+
+| | Aave's Fuji request | wallet ends | wagmi | chip |
+|---|---|---|---|---|
+| default (chain-checked) | **declined** | `0x14a34` ✓ | `connections:[]`, `current:null` | **false** |
+| `APPROVE_ANY_CHAIN=1`   | **approved** | `0xa869` ✗ Fuji | 1 conn, `io.rabby`, chainId 43113 | **true** |
+
+The chip renders ONLY when the wallet complies and moves to Avalanche Fuji.
+Decline, and wagmi destroys the connection — no wrong-network state, no
+recovery. Dialog fields captured verbatim:
+
+    [rabby] inputs=["43113","Avalanche Fuji",
+                    "https://api.avax-test.network/ext/bc/C/rpc","AVAX",...]
+
+### Why the Rabby `connect` cell is RETRACTED (fail → blocked)
+
+`metamask-actions.approveFollowUpRequests` → `resolveRequest(…,'confirm',…)`.
+No chain check. Blind approve.
+`rabby-actions.approveChainDialog` → declines anything that isn't 84532.
+Added by us after CI #10 landed on 0xa869.
+
+Same dApp, same behaviour, two harness policies, two verdicts — and the
+difference got written down as a difference between the WALLETS. It survived a
+CI run, a green suite, and a written cell note. Found only because the probe
+printed the dApp's own dialog contents.
+
+**The MetaMask `connect` pass is now flagged too.** It may have approved the
+Fuji switch before the chip was asserted, i.e. the chip may have rendered while
+the wallet was on the wrong network — the cell never records the chain at the
+moment it reads the chip. Not retracted (not shown wrong), not trusted (not
+shown right). Asymmetry contaminates both columns; only one looked broken.
+
+Rule now standing: **any harness policy that can change a verdict must be
+identical across every column.** A per-wallet safety rule is a per-wallet
+measurement bias.
+
+### Open confound — do NOT notify Aave yet
+
+`proto_base_sepolia_v3` is a valid market name (Aave's own testnet faucet uses
+it), so the URL is not the problem. But this profile is long-lived, and a stale
+market/chain in its storage would produce the same request. "Aave requests the
+wrong chain" and "our profile remembered the wrong chain" are both live.
+
+The storage dump was filtered to /wagmi|wallet|connect|recent/ — which would
+have hidden the key holding the answer. Now dumps everything.
+
+NEXT: clean-profile run. If Fuji is requested on a fresh profile, it is a
+dApp-level finding, wallet-independent, and goes to `aave/interface` under the
+10-working-day policy.
+
+### Run 7 — CLEAN PROFILE. Confound ruled out, cause identified.
+
+`.wallet-cache/rabby` deleted, `build:cache:rabby` re-run, fresh profile.
+Teardown reported `already disconnected` — no prior session existed.
+
+Aave still requested **Avalanche Fuji (43113)** on the Base Sepolia market.
+Identical dialog fields. So it is not stale profile state.
+
+The full (unfiltered) storage dump gives the cause:
+
+    cbwsdk.store … "metadata":{"appName":"Aave",
+      "appChainIds":[43113,84532,421614,534351,11155111,11155420]}
+    wagmi.store  … {"connections":[],"chainId":43113,"current":null}
+    testnetsEnabled = true
+
+**43113 is the FIRST entry in Aave's own testnet chain list. 84532 is second.**
+On a profile with zero history, wagmi's default chain is already 43113 before
+any connection exists. `?marketName=proto_base_sepolia_v3` selects the displayed
+market (UI confirmed "Base Market V3") but does NOT set the connector's chain.
+
+Filtering the storage dump to /wagmi|wallet|connect|recent/ would have hidden
+`cbwsdk.store` — the key holding the answer. Worth remembering.
+
+### The finding, stated at the strength the evidence supports
+
+CERTAIN (reproduced clean, dialog captured verbatim):
+1. With the Base Sepolia market selected, connecting triggers a wallet request
+   to switch to Avalanche Fuji.
+2. Declining that request leaves wagmi with `connections:[]`, `current:null` —
+   the established connection is destroyed. No wrong-network state, no error,
+   no recovery short of a reload.
+
+INTERPRETATION (Aave's call, not ours):
+3. Whether a single wagmi default chain is intended design. Plausibly yes.
+   Point 2 is the part that is hard to defend, and it is where the issue should
+   lead. Point 1 is the trigger, not the accusation.
+
+Maps exactly onto the matrix's `reject` thesis: a user rejecting a prompt should
+land in a handled state, not a destroyed one. This is that, in a shipped dApp,
+found only because a real wallet could actually say no.
+
+### Harness change still owed
+
+Both wallet paths must use the SAME chain-dialog policy. Until then neither
+`connect` cell is trustworthy. Expected consequence once symmetric: MetaMask and
+Rabby BOTH show no chip on Aave Base Sepolia under the safe policy, and both
+cells carry the same dApp-level note. That is the truthful matrix.

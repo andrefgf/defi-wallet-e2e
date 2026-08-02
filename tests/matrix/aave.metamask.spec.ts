@@ -7,6 +7,7 @@ import {
   dismissAnalyticsPrompt,
 } from '../../utils/helpers'
 import * as mm from '../../utils/metamask-actions'
+import { recoverMessageAddress, stringToHex } from 'viem'
 import type { Page } from '@playwright/test'
 
 /**
@@ -24,6 +25,19 @@ import type { Page } from '@playwright/test'
  */
 
 const CHAIN = 'base-sepolia'
+
+/**
+ * EIP-6963 identity of the wallet under test.
+ *
+ * Every cell should resolve its provider by `rdns`, NOT via `window.ethereum`.
+ * The legacy slot belongs to whichever extension won the injection race, and it
+ * lies: on André's daily browser `window.ethereum` reports `isMetaMask: true`
+ * AND `isOneKey: true` at the same time. Today the test profile loads only
+ * MetaMask so the two agree — but the moment Rabby joins the matrix they won't,
+ * and a cell that trusted the legacy slot would silently measure the wrong
+ * wallet. See matrix/data/wallets.csv.
+ */
+const RDNS = 'io.metamask'
 
 /** Wrap a flow: any throw becomes a single honest `blocked` line + red test. */
 async function runCell(flow: string, body: () => Promise<void>): Promise<void> {
@@ -62,6 +76,19 @@ function chipMatches(chipText: string, account: string): boolean {
   return acc.startsWith(head) && acc.endsWith(tail)
 }
 
+/**
+ * NO RETRIES ON MATRIX CELLS — and this must match every other wallet column.
+ *
+ * playwright.config sets `retries: CI ? 1 : 0`. The Rabby spec overrode that to
+ * 0; this one did not. So in CI a MetaMask cell got a second attempt and a Rabby
+ * cell got one — two different measurement regimes, recorded side by side in the
+ * same table as if they were comparable.
+ *
+ * A cell verdict is a measurement, not a flaky assertion. If a cell is unstable,
+ * that instability IS the finding and belongs in the notes.
+ */
+test.describe.configure({ retries: 0 })
+
 test.describe('Matrix — Aave × MetaMask', () => {
   test('connect', async ({ page, context, extensionId }) => {
     await runCell('connect', async () => {
@@ -72,6 +99,79 @@ test.describe('Matrix — Aave × MetaMask', () => {
       const chip = await connect.accountChip(page).innerText().catch(() => '')
       const ok = !!account && chipMatches(chip, account)
       verdict('connect', ok ? 'pass' : 'fail', `chip="${chip}", account=${account}, chain=${CHAIN}`)
+    })
+  })
+
+  test('sign', async ({ page, context, extensionId }) => {
+    await runCell('sign', async () => {
+      await connectWallet(page, context, extensionId)
+      await expectConnected(page)
+
+      const account = await authorisedAccount(page)
+      if (!account) throw new Error('sign: no authorised account after connect')
+
+      // A FRESH message every run, carrying a timestamp nonce.
+      //
+      // This is the part a mocked provider cannot survive, and it's the whole
+      // reason the flow exists. A stub hands back a canned signature; because
+      // the message is new on every run and the address is recovered from the
+      // signature itself, a canned value recovers to the wrong address (or to
+      // nothing) and the cell reads `fail`. The assertion and the signature do
+      // not share an assumption — which is exactly what mocked suites cannot say.
+      const message = `Prumada wallet-layer matrix — Aave/MetaMask sign check @ ${new Date().toISOString()}`
+      const hexMessage = stringToHex(message)
+
+      // personal_sign does not settle until the wallet approves, so DON'T await
+      // it yet — the approval is the next step.
+      const pending = page.evaluate(
+        async ({ rdns, hex, from }) => {
+          type Provider = { request(args: unknown): Promise<string> }
+          type Announce = { info?: { rdns?: string }; provider?: Provider }
+
+          // Ask every installed wallet to announce itself, then pick ours by rdns.
+          const discovered = await new Promise<Provider | null>((resolve) => {
+            const onAnnounce = (event: Event) => {
+              const detail = (event as CustomEvent).detail as Announce | undefined
+              if (detail?.info?.rdns === rdns) resolve(detail.provider ?? null)
+            }
+            window.addEventListener('eip6963:announceProvider', onAnnounce)
+            window.dispatchEvent(new Event('eip6963:requestProvider'))
+            setTimeout(() => resolve(null), 2000)
+          })
+
+          const legacy = (window as unknown as { ethereum?: Provider }).ethereum
+          const provider = discovered ?? legacy
+          if (!provider) throw new Error('no injected provider on the page')
+
+          const signature = await provider.request({
+            method: 'personal_sign',
+            params: [hex, from],
+          })
+          return { signature, via: discovered ? 'eip6963' : 'window.ethereum' }
+        },
+        { rdns: RDNS, hex: hexMessage, from: account },
+      )
+
+      // Generous budget: the popup has to boot, and MV3 may have to restart and
+      // unlock the service worker first (see tests/matrix/STATUS.md).
+      await mm.approveFollowUpRequests(context, extensionId, 3, 90_000)
+      await capture(page, 'sign — after wallet approval')
+
+      const { signature, via } = await pending
+
+      // GROUND TRUTH: who actually signed, computed from the signature itself.
+      // Not "the modal closed", not "a toast appeared".
+      const recovered = await recoverMessageAddress({
+        message: { raw: hexMessage },
+        signature: signature as `0x${string}`,
+      })
+
+      const ok = recovered.toLowerCase() === account.toLowerCase()
+      verdict(
+        'sign',
+        ok ? 'pass' : 'fail',
+        `recovered=${recovered}, account=${account}, via=${via}, chain=${CHAIN}`,
+      )
     })
   })
 
@@ -135,7 +235,7 @@ test.describe('Matrix — Aave × MetaMask', () => {
       await capture(page, 'reconnect — after reload')
 
       if (outcome === 'unknown') {
-        throw new Error(`reconnect: neither chip nor connect CTA within 45s (before=${before})`)
+        throw new Error(`reconnect: neither chip nor connect CTA within 30s (before=${before})`)
       }
 
       const after = outcome === 'restored' ? await authorisedAccount(page) : null

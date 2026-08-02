@@ -1,4 +1,10 @@
 import type { BrowserContext, Page } from '@playwright/test'
+import {
+  readChainDialog,
+  decideChainDialog,
+  logChainVerdict,
+  TARGET_CHAIN_ID,
+} from './chain-policy'
 import fs from 'node:fs'
 
 /**
@@ -249,13 +255,29 @@ export async function getNotificationPage(
   // Give MetaMask a beat to register the request the dApp just fired.
   await new Promise((resolve) => setTimeout(resolve, 2000))
 
-  // Headed: MetaMask opens the popup window itself. Scan briefly for the
-  // window — but once it EXISTS, commit to it patiently instead of racing it.
-  // The old code gave a found-but-still-booting popup only one aggressive
-  // render attempt inside a 5s window, then fell through and opened a SECOND
-  // notification.html next to it. Two racing notification UIs on a slow
-  // machine is how "Requesting Connection" hangs forever.
-  const popupDeadline = Date.now() + 5000
+  // Headed: MetaMask opens the popup window itself. Wait for it PATIENTLY —
+  // and once it EXISTS, commit to it instead of racing it. Two hard-won rules:
+  //
+  //  * The old code gave a found-but-still-booting popup only one aggressive
+  //    render attempt inside a 5s window, then fell through and opened a SECOND
+  //    notification.html next to it. Two racing notification UIs on a slow
+  //    machine is how "Requesting Connection" hangs forever.
+  //  * 2026-08-01: the SCAN window itself was 5s, and that recreated the same
+  //    race from the other side. Under load (fresh profile copy, Defender,
+  //    Aave booting) MetaMask can take tens of seconds to raise its popup; the
+  //    scan gave up first, opened notification.html, and MetaMask's real popup
+  //    then arrived next to it. Every operation on the doubled-up UI took
+  //    minutes (a 1s waitForTimeout took 166s in the trace), the 90s budget
+  //    died inside one loop iteration, and this function reported "never
+  //    showed a pending request" for a request that was showing in the window
+  //    next door. connect/sign/reconnect all blocked that way; reject passed
+  //    only because its popup happened to beat the 5s scan. So: wait up to 60s
+  //    (bounded by the caller's budget) before concluding no popup is coming.
+  //
+  // Headless: the popup window is NEVER created, so don't scan for it at all —
+  // go straight to opening notification.html ourselves.
+  const headless = !!process.env.HEADLESS
+  const popupDeadline = Date.now() + (headless ? 0 : Math.min(60_000, timeoutMs))
   let popup: Page | undefined
   while (Date.now() < popupDeadline && !popup) {
     popup = context.pages().find((p) => p.url().startsWith(url))
@@ -345,6 +367,7 @@ async function resolveRequest(
   extensionId: string,
   kind: 'confirm' | 'cancel',
   timeoutMs?: number,
+  expectedChainIdDec: number = TARGET_CHAIN_ID,
 ): Promise<void> {
   const page = await getNotificationPage(context, extensionId, timeoutMs)
   const button = actionButton(page, kind)
@@ -390,6 +413,49 @@ async function resolveRequest(
         return
       }
       continue
+    }
+
+    // CHAIN GUARD — the fix for the measurement bias that got a cell retracted.
+    //
+    // This loop walks MetaMask's multi-step flow, and one of those steps can be
+    // a network add/switch the DAPP asked for, not us. This function used to
+    // approve it without looking, while the Rabby path refused any chain that
+    // wasn't the one under test. Aave requests Avalanche Fuji during connect on
+    // its Base Sepolia market, so the two columns diverged on the dApp's
+    // behaviour and the difference was written down as a difference between the
+    // wallets. Same policy for every wallet now — see utils/chain-policy.ts.
+    //
+    // PLACEMENT IS LOad-BEARING, and getting it wrong cost a full local run.
+    //
+    // The first version of this guard sat at the TOP of the loop, before the
+    // button wait. MetaMask routinely paints a blank notification page while it
+    // boots — there is an entire `waitUntilRendered` helper about it — so the
+    // guard read an empty document, applied the "never approve what you cannot
+    // read" rule, and CANCELLED the request. All four MetaMask cells came back
+    // blocked, two of them logging `dialog never painted`. The policy was right;
+    // it was being asked about a page that had not loaded yet.
+    //
+    // Here, `appeared` has already resolved, so a confirm button is visible and
+    // the document has definitely rendered. Now "unreadable" means genuinely
+    // anomalous rather than merely early, and declining it is safe.
+    if (kind === 'confirm') {
+      const reading = await readChainDialog(page, 6000)
+      const verdict = decideChainDialog(reading, expectedChainIdDec)
+      logChainVerdict('metamask', verdict, reading)
+
+      if (verdict.decision === 'decline') {
+        // Refuse THIS screen without abandoning the flow. A rejected network
+        // switch is a legitimate outcome to measure, not a harness failure —
+        // what the dApp does next is precisely what the matrix records.
+        await actionButton(page, 'cancel').click({ timeout: 8000 }).catch(() => {})
+        await page.waitForTimeout(1500).catch(() => {})
+        if (page.isClosed()) return
+        if (!(await showsRequest(page))) {
+          await page.close().catch(() => {})
+          return
+        }
+        continue
+      }
     }
 
     const enabled = await button.isEnabled().catch(() => false)
