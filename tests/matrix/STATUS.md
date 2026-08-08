@@ -1344,3 +1344,82 @@ Two parts carry most of the value:
 It also records the three Phantom **non-defects** (`popup.html` closing,
 `notification.html` blank, `index.html` absent) so the three probe runs already
 spent learning that they are normal empty states are never spent again.
+
+---
+
+## 2026-08-08 — CI run #16. The instrument works. The experiment did not complete.
+
+Two runs off commit `3f885f6` / merge `1320ec2`.
+
+**E2E #29 (main): SUCCESS, 7 passed 3 skipped, 12.1m.** The shared connect path
+did not regress the stable suite. Worth stating first, because that was the risk.
+
+**Matrix #16 (matrix-runner): job succeeded, 27m32s, 1 failed 7 passed.**
+
+### THE TRACE FIRED — first time the ordering has ever been measured
+
+```
+[chain-order] Rabby connect — 3 chain request(s)
+  + 15177ms  wallet_switchEthereumChain  chainId=0xa869
+  + 15190ms  wallet_addEthereumChain     chainId=0xa869 (Avalanche Fuji)
+  + 47269ms  wallet_addEthereumChain     chainId=0x14a34 (Base Sepolia)
+```
+
+Identical shape on a second cell (14910 / 14916 / 46982 ms), so it reproduces.
+
+**The switch-then-add pair 13ms apart for Fuji is wagmi's canonical recovery:**
+try `wallet_switchEthereumChain`, catch the unrecognised-chain error, then
+`wallet_addEthereumChain`. **The harness never asks for 43113** — it only ever
+asks for 84532. So those two are the dApp's, and **the dApp asks 32 seconds before
+we do.**
+
+Alongside them, two declines from the shared policy:
+```
+[rabby] chain dialog decline: dialog never painted — declining rather than approving something unreadable
+[rabby] chain dialog decline: wrong chain (saw 43113, want 84532)
+[rabby] inputs=["43113","Avalanche Fuji","https://api.avax-test.network/ext/bc/C/rpc","AVAX",...]
+```
+
+### But NO COMPARISON IS POSSIBLE, for two independent reasons
+
+**1. MetaMask/connect never produced a verdict.** It died in fixture setup after
+10.1 minutes: `Test timeout of 600000ms exceeded while setting up "metamaskPage"`,
+thrown from `openMetaMaskHome` (`utils/wallet-cache.ts:215`) with *"Target page,
+context or browser has been closed"*. The other three MetaMask cells passed —
+and they call `connectWallet` internally — so MetaMask can still connect. This
+reads environmental (MV3 worker death / extension page closing during boot), not
+logical. It also cost the 10 minutes that took the run from ~13m to 27m.
+
+**2. I only fitted the instrument to one arm.** `CHAIN_REQUEST_HOOK` went into
+`fixtures/rabby.ts` and **not** `fixtures/metamask.ts`. So even had MetaMask's
+connect cell passed, there would have been no MetaMask timeline to compare
+against. An instrument fitted to one arm of a controlled comparison measures
+nothing about the comparison. **Fixed 08-08** — the hook is now in both, and it is
+worth having on the MetaMask column *while it still runs the old path*, because
+that path is the one that produces a green cell and therefore defines what
+"working" looks like.
+
+### The caller heuristic was wrong on 2 of 3 — removed
+
+Every request came back `caller~harness?`, **including both Fuji ones**. Modern
+bundlers emit `<anonymous>` frames, so the regex matched page code as readily as
+`page.evaluate`. It was labelled a heuristic, which is why it did no damage — but
+a confidently-wrong label is METHODOLOGY §7's `provider account=` defect exactly:
+a value right by luck, described wrong.
+
+Replaced with **`stackHead`** — the top three stack frames printed verbatim under
+each entry. Attribution is a judgement; the evidence for it should be visible in
+the log rather than pre-chewed into a word.
+
+### Standing conclusion
+
+**Aave x Rabby x connect stays `blocked`.** One column measured, the other absent,
+and the instrument was on one arm. Nothing here is comparative, so nothing here
+records a cell.
+
+### Next run needs
+1. MetaMask/connect to actually execute. If it times out again in fixture setup,
+   that is its own defect and belongs in `openMetaMaskHome`, not in a cell note.
+2. Both `[chain-order]` blocks present, so the two orderings can be laid side by
+   side.
+3. Then, and only then, a verdict on the Rabby cell.

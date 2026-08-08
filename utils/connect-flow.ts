@@ -153,11 +153,23 @@ export const CHAIN_REQUEST_HOOK = `(() => {
             rdns: rdns,
             chainId: (args.params && args.params[0] && args.params[0].chainId) || null,
             chainName: (args.params && args.params[0] && args.params[0].chainName) || null,
-            // HEURISTIC, and labelled as one. Our calls arrive via
-            // page.evaluate, which shows as an eval frame; the dApp's arrive
-            // from bundled app code. Good enough to read a timeline, NOT good
-            // enough to publish an attribution.
-            likelyCaller: /\\beval\\b|<anonymous>/.test(stack) ? 'harness?' : 'dapp?'
+            // RAW STACK HEAD, not a guess.
+            //
+            // This field used to be 'likelyCaller', a regex over the stack
+            // returning 'harness?' or 'dapp?'. Run #16 tagged ALL THREE requests
+            // 'harness?' — including the two for Avalanche Fuji, which the
+            // harness never asks for and which are certainly the dApp's. Modern
+            // bundlers emit <anonymous> frames, so the regex matched page code
+            // too and the field was wrong on 2 of 3.
+            //
+            // A label that is confidently wrong is worse than no label; that is
+            // METHODOLOGY §7's "provider account=" defect exactly — a value that
+            // was right by luck and described wrong. So: print the top frames
+            // verbatim and let a human attribute. Attribution is a judgement,
+            // and the evidence for it should be visible in the log.
+            stackHead: stack.split('\\n').slice(1, 4).map(function (s) {
+              return s.trim().replace(/^at\\s+/, '').slice(0, 90)
+            })
           })
         }
       } catch (err) { /* never let logging break a request */ }
@@ -172,7 +184,7 @@ export type ChainLogEntry = {
   rdns: string
   chainId: string | null
   chainName: string | null
-  likelyCaller: string
+  stackHead: string[]
 }
 
 /** Read the timeline back out and print it. Safe on a page without the hook. */
@@ -185,8 +197,9 @@ export async function readChainLog(page: Page, label: string): Promise<ChainLogE
   for (const e of log) {
     console.log(
       `  +${String(e.ms).padStart(6)}ms  ${e.method}  chainId=${e.chainId ?? '-'}` +
-        `${e.chainName ? ` (${e.chainName})` : ''}  rdns=${e.rdns}  caller~${e.likelyCaller}`,
+        `${e.chainName ? ` (${e.chainName})` : ''}  rdns=${e.rdns}`,
     )
+    for (const frame of e.stackHead ?? []) console.log(`             ${frame}`)
   }
   if (!log.length) {
     console.log('  (none — either the hook was not installed via addInitScript, or nothing asked)')

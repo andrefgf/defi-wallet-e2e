@@ -9,6 +9,7 @@ import {
   unlockMetaMask,
   walletProfilePath,
 } from '../utils/wallet-cache'
+import { CHAIN_REQUEST_HOOK } from '../utils/connect-flow'
 
 /**
  * The `testWithMetaMask` fixture: every test starts with a real MetaMask,
@@ -95,6 +96,20 @@ export const test = base.extend<MetaMaskFixtures>({
         // never let this break the page under test
       }
     })
+
+    // Chain-request ordering trace — added 2026-08-08, after run #16.
+    //
+    // The hook went into fixtures/rabby.ts only, which made the comparison the
+    // whole refactor exists for IMPOSSIBLE: even had MetaMask's connect cell
+    // passed that run, there would have been no MetaMask timeline to compare
+    // the Rabby one against. An instrument fitted to one arm of a controlled
+    // comparison measures nothing.
+    //
+    // Worth having here even while this column still runs the OLD connect path
+    // (helpers.connectWallet). That path is the one that produces a GREEN cell,
+    // so its ordering is the reference: it shows what "working" looks like
+    // before anything is changed to match it.
+    await context.addInitScript(CHAIN_REQUEST_HOOK)
 
     await use(context)
 
