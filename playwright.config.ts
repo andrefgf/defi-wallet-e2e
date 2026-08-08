@@ -38,8 +38,19 @@ export default defineConfig({
     : [['html', { open: 'never' }], ['list']],
 
   use: {
-    // Aave's only live testnet market is Base Sepolia; testnet mode itself is a
-    // localStorage flag set by the fixture (see fixtures/metamask.ts).
+    // CORRECTED 2026-08-06: this used to claim "Aave's only live testnet market
+    // is Base Sepolia". That is false and it nearly killed the Ethereum Sepolia
+    // plan on the strength of a comment. Aave V3 ships testnet markets on
+    // Ethereum Sepolia (proto_sepolia_v3), Arbitrum Sepolia, Base Sepolia,
+    // Scroll Sepolia, Optimism Sepolia and Avalanche Fuji.
+    //
+    // Testnet mode is a localStorage flag, NOT the `?testnet=true` query param —
+    // set by the fixtures (fixtures/metamask.ts, fixtures/rabby.ts). Without it
+    // Aave ignores marketName entirely and renders the Ethereum MAINNET market.
+    // The Phantom probe hit exactly that on 2026-08-06: it navigated to
+    // ?marketName=proto_base_sepolia_v3 with a raw context and no flag, and the
+    // screenshot shows "Core Instance V3 — Main Ethereum market", $20.43B TVL.
+    // Any probe that does not go through a fixture must set the flag itself.
     baseURL: process.env.DAPP_URL ?? 'https://app.aave.com/?marketName=proto_base_sepolia_v3',
 
     // In CI: always on, not just on failure. These specs ARE the deliverable —

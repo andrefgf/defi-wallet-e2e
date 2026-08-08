@@ -5,6 +5,7 @@ import path from 'node:path'
 import 'dotenv/config'
 import { browserArgsFor, rabbyExtensionPath, rabbyProfilePath } from '../utils/wallet-cache'
 import { unlockIfLocked } from '../utils/rabby-actions'
+import { CHAIN_REQUEST_HOOK } from '../utils/connect-flow'
 
 /**
  * The Rabby fixture — sibling of `fixtures/metamask.ts`.
@@ -66,6 +67,17 @@ export const test = base.extend<RabbyFixtures>({
         // never let this break the page under test
       }
     })
+
+    // Chain-request ordering trace. MUST go in at init time so it registers its
+    // eip6963 listener before the dApp's bundle does — listeners fire in
+    // registration order, so this puts us ahead of wagmi and lets us wrap the
+    // provider object wagmi will itself receive.
+    //
+    // This is the measurement Aave x Rabby x connect is blocked on: "the ORDER
+    // in which each column fires its Base Sepolia add-chain relative to the
+    // dApp's own mid-connect chain-switch request has never been established."
+    // Read it back with connect-flow.readChainLog().
+    await context.addInitScript(CHAIN_REQUEST_HOOK)
 
     await use(context)
 

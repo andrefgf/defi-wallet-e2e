@@ -819,3 +819,528 @@ Both wallet paths must use the SAME chain-dialog policy. Until then neither
 `connect` cell is trustworthy. Expected consequence once symmetric: MetaMask and
 Rabby BOTH show no chip on Aave Base Sepolia under the safe policy, and both
 cells carry the same dApp-level note. That is the truthful matrix.
+
+---
+
+## 2026-08-06 (Thu) — Phantom prep: the gating unknown found BEFORE any harness work
+
+Same pattern as the Rabby prep on 2026-07-26 — close the unknowns without
+touching the harness. It has already paid for itself.
+
+### The finding that reshapes the column
+
+**Phantom's help centre states it does not support adding custom networks.** The
+supported list is fixed — Solana, Ethereum, Polygon, Base, Bitcoin, Sui, Monad,
+HyperEVM, Robinhood Chain — with no manual-add path, and the docs explicitly name
+Arbitrum, Optimism, BSC, Avalanche, Linea and zkSync as unsupported.
+
+Every other column reaches Base Sepolia (84532) by firing
+`wallet_addEthereumChain`. If that is accurate for the extension's EVM provider,
+**Aave x Phantom cannot be measured on Base Sepolia at all.**
+
+### Why that is NOT four failing cells
+
+The matrix pins `chain = base-sepolia`. **That pin is a harness policy**, and
+`utils/chain-policy.ts` already states the rule it falls under:
+
+> ANY harness policy that can change a verdict must be identical across every
+> column.
+
+Recording `fail` against Phantom for a chain it never claimed to ship would be
+blaming the wallet for our scope decision. That is the same class of error as the
+2026-07-30 Rabby retraction (two chain policies, one recorded as a wallet
+difference) and the withdrawn Aave finding. The honest outcomes are:
+
+- an **`unsupported`** cell carrying the verbatim error, or
+- moving the Phantom column to a chain Phantom actually ships.
+
+Phantom has a **Testnet Mode** (Settings → Developer Settings) exposing Ethereum
+Sepolia. Aave has a Sepolia market. Whether Testnet Mode also exposes Base
+Sepolia is **UNKNOWN**. If the column has to move to Ethereum Sepolia, the matrix
+must say so per-cell — a cell measured on a different chain is not comparable to
+one that wasn't, and hiding that would be the whole project's own failure mode.
+
+**Do not write any of this into the matrix from a help article.** Help articles
+go stale; the `fill()` retraction is what happens when a plausible mechanism gets
+published before it is measured. Phase 3 of the probe measures it on the shipped
+extension.
+
+### Second finding: Phantom cannot be version-pinned
+
+MetaMask and Rabby publish versioned builds. Phantom ships through the Chrome Web
+Store only (id `bfnaelmomeimhlpmgjnjophhpkkoljpa`) and publishes no download.
+Searching surfaces several third-party "Phantom download" repos — every one an
+unverified mirror of a *wallet*, which is not a trade this project makes.
+
+`scripts/fetch-phantom.mjs` therefore pulls from **Google's own CRX endpoint**
+(authentic, but always current) and **prints the resolved version loudly**. The
+repo's rule — *"a verdict against whatever was latest that day is not
+reproducible"* — is satisfied the other way round: we cannot pin, so we record.
+`wallet_version` is mandatory for every Phantom cell, not optional.
+
+`phantomProfilePath()` keys the cache on the resolved version, so a Web Store
+update invalidates the profile instead of silently leaving a stale one in place.
+
+### Already known, not re-litigated
+`RDNS.phantom = 'app.phantom'` is in `utils/provider-eval.ts`, and the
+five-wallet probe on 2026-07-26 saw Phantom announce **synchronously** over
+EIP-6963 alongside MetaMask, Rabby, OneKey and Brave. Provider resolution is
+solved before the column starts — unlike Rabby, where it wasn't.
+
+### Shipped this session
+- `scripts/fetch-phantom.mjs` — CRX fetch, extract, record version. Parse-checked.
+- `scripts/probe-phantom.ts` — four phases, each independently useful:
+  0 load + manifest (is it MV3? expect service-worker death if so)
+  1 onboarding/UI surface inventory — **dumps** routes, buttons, inputs, testids
+  2 EIP-6963 announcement + provider fingerprint from the dApp origin
+  3 **THE GATE** — `wallet_addEthereumChain(0x14a34)`, recording which of
+    *dialog opens* / *rejects with code+message* / *silently resolves* happens
+  4 Testnet Mode + chain enumeration — guarded, needs an onboarded wallet
+- `phantomExtensionPath()`, `phantomVersion()`, `phantomProfilePath()` in
+  `utils/wallet-cache.ts`; `.env.example` vars; `fetch:phantom` + `probe:phantom`.
+
+Deliberately NOT written: `aave.phantom.spec.ts`, `utils/phantom-actions.ts`,
+`utils/phantom-onboarding.ts`. Phantom's routes and selectors are unobserved, and
+guessing them is how the Rabby column lost an evening to debugging a fiction.
+
+### Next
+Run `pnpm run probe:phantom` on the laptop (it is a download plus a look, not a
+wallet flow, so local is fine). Read `matrix-out/phantom-probe/*.json` **before**
+writing a selector. Phase 3's answer decides whether this column measures Base
+Sepolia, moves chain, or records `unsupported`.
+
+Three of the four phases need no seed. Add a burner `PHANTOM_SEED_PHRASE` only
+when phase 4 is actually reached.
+
+## 2026-08-06 (Thu) — Phantom probe run 1. Phantom **26.24.0**, MV3.
+
+### The strongest finding, and it is not the chain one
+
+**Phantom's EIP-6963-announced provider carries `isMetaMask: true`.**
+
+```
+announced: [{ rdns: "app.phantom", name: "Phantom",
+              flags: ["isPhantom", "isMetaMask"] }]
+legacy:    { flags: ["isMetaMask", "isSelectingExtension"], hasProviders: true }
+```
+
+This is the **third distinct vendor** observed claiming `isMetaMask` — OneKey
+(2026-07-21), Rabby (2026-07-26), now Phantom. Two things make it stronger than
+either earlier observation:
+
+1. It is on the **announced provider object itself**, not only the legacy
+   `window.ethereum` slot. The earlier two were slot observations.
+2. `browserArgsFor()` passes `--disable-extensions-except`, so this profile had
+   **exactly one extension loaded**. There is no attribution ambiguity: the flag
+   is Phantom's, not a neighbour's.
+
+`window.ethereum` also reports `isSelectingExtension` and a `providers` array
+with a single wallet installed. Worth understanding before it is described.
+
+Any dApp gating on `window.ethereum.isMetaMask` is reading install order, not
+intent. Three vendors, three probes, one conclusion — that is publishable and it
+belongs in the write-up regardless of what happens to the Phantom column.
+
+### The chain question: run 1 measured LESS than it looks
+
+```
+before: "0x1"   requested: 0x14a34 (Base Sepolia)
+outcome: rejected   code: 4901
+message: "The Provider is not connected to the requested chain."
+```
+
+EIP-1193: **4901 = chainDisconnected** — the provider knows the chain but is
+disconnected from it *while connected to others*. **4902** is the "unrecognised,
+add it" code. Getting 4901 back from an *add* request is genuinely odd, and it
+reads like a refusal.
+
+**It cannot be read that way, because the wallet was never onboarded.** Zero
+accounts. A wallet with no accounts is plausibly disconnected from *everything*,
+so 4901 may be Phantom's generic no-wallet answer with nothing to do with Base
+Sepolia. Two explanations fit; the run cannot separate them. That is precisely
+the `fill()` situation, one step from being written into the matrix.
+
+**Control added to phase 3:** fire the identical request for **Base mainnet
+(0x2105)**, which IS on Phantom's published list, in the same state. One variable
+moves — the chain id.
+
+- both 4901 → the code is wallet state, run 1 measured nothing, re-run onboarded
+- codes differ → the response really does depend on the chain
+
+The probe now prints which of those happened, so the next run cannot be
+misremembered.
+
+### Phase 1 — routes, and three non-defects
+
+| route | result | reading |
+|---|---|---|
+| `onboarding.html` | paints: "Create a New Wallet" / "I Already Have a Wallet" | the entry point |
+| `popup.html` | target closed | **not broken** — no wallet exists yet |
+| `index.html` | "Your file couldn't be accessed" | route simply does not exist in Phantom |
+| `notification.html` | exists, paints nothing | **not broken** — nothing pending |
+
+Rabby cost three probes to learn that an empty approval surface closing itself is
+normal. Not paying that twice: none of the three is recorded as a defect.
+
+**Selectors will be text/role, as Rabby.** `totalTestIds: 2` for the whole
+onboarding page and **neither primary button has one**. Classes are build-hashed
+(`_1bgnhl3 kch3850…`) and will churn on every Web Store update — which, with no
+version pinning, is not something we control.
+
+### Next
+1. Re-run for the control. Read the verdict line the probe now prints.
+2. Only if the control says the signal is real: onboard a burner and re-run.
+
+## 2026-08-06 (Thu, later) — a claim retracted, and the screenshot that caught it
+
+André pushed back on *"window.ethereum.isMetaMask reads install order"* and asked
+for a controlled multi-wallet run. He was right, and re-reading the evidence shows
+the sentence bundled two propositions with only one of them measured.
+
+| | claim | status |
+|---|---|---|
+| **P1** | a wallet sets `isMetaMask` on its OWN provider | **MEASURED.** Phantom-only profile (`--disable-extensions-except`), the `app.phantom` ANNOUNCED provider carries `isMetaMask`. One extension, no neighbours, no ambiguity. |
+| **P2** | `window.ethereum` is won by load/install order | **NOT MEASURED.** 07-21 (MetaMask+OneKey) and 07-26 (five wallets) both show the slot carrying `isMetaMask` plus another vendor's flag — but **neither run ever varied the order.** With order held constant you cannot learn whether order matters. |
+
+P2 was asserted on P1's evidence. P1 is impersonation; P2 is precedence. They are
+different findings and only P1 is currently defensible.
+
+**`scripts/probe-provider-identity.ts`** measures P2 properly: same two wallets,
+both orders, fresh profile per run, **N repeats per config**, neutral origin
+(`example.com` — a dApp's own wagmi enumerates and re-wraps the slot, which would
+contaminate it). Baselines per wallet alone so a combined reading can be
+attributed rather than guessed.
+
+The repeats are the point. Three outcomes, and the third is invisible to a single
+run:
+- both orders stable and DIFFERENT -> order decides, P2 supported
+- both orders stable and SAME -> order does not decide, **P2 is false as written**
+- either config flips between identical runs -> **a RACE**, which is a stronger
+  finding than either and cannot be described as "order"
+
+The script prints the verdict so it cannot be misremembered.
+`browserArgsForAll()` added; `pnpm run probe:identity`.
+
+### The screenshot caught something else entirely
+
+`3-after-add-chain.png` shows Aave rendering **"Core Instance V3 — Main Ethereum
+market"**, $20.43B total market size, mainnet assets, banner advertising Aave V4
+on mainnet. The probe navigated to `?marketName=proto_base_sepolia_v3`.
+
+**Aave ignored marketName and served mainnet**, because testnet mode is a
+`localStorage` flag and the probe used a raw context instead of a fixture, so
+nothing set it. Reading the JSON alone, this was invisible — the phase-3 result
+looked clean. It is the same lesson as the withdrawn Aave finding: the screenshot
+had the answer and the log did not.
+
+Phase 2's EIP-6963 reading survives (announcement is origin-level, independent of
+which market renders) and phase 3's `before: "0x1"` is consistent either way. But
+**any probe not going through a fixture must set `testnetsEnabled` itself.**
+
+### Stale comment corrected — it would have killed the Sepolia plan
+
+`playwright.config.ts:41` claimed *"Aave's only live testnet market is Base
+Sepolia."* **False.** Aave V3 ships testnet markets on **Ethereum Sepolia
+(`proto_sepolia_v3`)**, Arbitrum Sepolia, Base Sepolia, Scroll Sepolia, Optimism
+Sepolia and Avalanche Fuji.
+
+This also explains the Fuji request cleanly. The clean-profile storage dump on
+07-30 showed `appChainIds:[43113, 84532, 421614, 534351, 11155111, 11155420]` —
+that is exactly Aave's testnet list, and **43113 (Fuji) is first**. wagmi defaults
+to the first entry. Ethereum Sepolia is 11155111, fifth — so **moving the matrix
+to Sepolia does NOT dodge the Fuji switch request.** The chain-dialog policy stays
+load-bearing after the move.
+
+### Ethereum Sepolia — approved, and what it costs
+Aave has the market, and Phantom ships Ethereum (with Testnet Mode) while shipping
+neither Base Sepolia nor Unichain Sepolia. So Sepolia is the candidate chain where
+MetaMask, Rabby and Phantom can all be measured **comparably**. Cost: one CI re-run
+of two already-green columns. Still to verify: that Phantom's Testnet Mode really
+exposes Ethereum Sepolia in the shipped extension, not just in the help centre.
+
+## 2026-08-06 (Thu, run 2) — the control worked. Phantom answers from a STATIC ALLOWLIST.
+
+Identical state (`before: "0x1"` both), one variable moved — the chain id.
+
+| requested | outcome | code |
+|---|---|---|
+| `0x14a34` Base Sepolia — not on Phantom's list | **rejected** | **4901** |
+| `0x2105` Base mainnet — on Phantom's list | **resolved** | returned `null` |
+
+`null` is EIP-3085's success response. The two differ, so **4901 is not a generic
+no-wallet answer** and the confound raised in run 1 is dead.
+
+### The part that is stronger than expected
+
+**No wallet existed.** No accounts, no unlock, no approval dialog — Phantom
+answered both requests from a **static allowlist before any user was involved.**
+Contrast the other two columns, where every chain request raises a dialog a person
+must answer (and where Rabby additionally gates it behind a security alert).
+
+Three wallets, three postures toward an unknown chain:
+
+| wallet | posture |
+|---|---|
+| MetaMask | adds any chain, standard approval dialog |
+| Rabby | adds any chain, security warning, primary button **disabled** until "Ignore all" |
+| **Phantom** | **refuses without asking anyone** — static list, no dialog, no user |
+
+That comparison is the matrix's actual thesis — *how testable is this wallet* — and
+it is worth more published than a fourth green tick.
+
+### Stated at the strength the evidence supports
+
+CERTAIN (measured, reproduced with a control):
+1. Phantom rejects `wallet_addEthereumChain` for Base Sepolia with **4901**.
+2. It accepts the same call for Base mainnet.
+3. It does both with no wallet onboarded and no dialog.
+
+INTERPRETATION (ours, and it must be labelled as such):
+4. **4901 is `chainDisconnected`** — per EIP-1193, "disconnected from a specific
+   chain *while connected to others*". The canonical dApp recovery is
+   `wallet_switchEthereumChain` → catch **4902** (`unrecognisedChain`) → then
+   `wallet_addEthereumChain`. A dApp following that standard pattern **will not
+   match 4901** and falls through to a generic error rather than a recovery.
+   EIP-3085 does not mandate a rejection code, so this is a conformance
+   *observation*, **not a violation**. Write it that way or not at all.
+
+NOT ESTABLISHED:
+5. Whether an onboarded wallet behaves differently. The confound that mattered is
+   dead, but the onboarded run is still owed before a cell is recorded.
+6. Whether the Base-mainnet control genuinely *added* anything or no-opped on a
+   chain already present. Does not weaken the comparison — the point is the two
+   were treated differently — but do not claim more than that.
+
+### Consequence for the matrix
+Aave x Phantom on Base Sepolia is **not measurable**. The cell value is
+**`unsupported`** with the verbatim error, never `fail`. Recording `fail` would
+blame Phantom for our chain pin — the same class of error as the Rabby retraction
+and the withdrawn Aave finding.
+
+### ⚠ And it puts a question mark over the Ethereum Sepolia migration
+The migration's Phantom rationale is "Phantom ships Ethereum". But Phantom's
+testnets sit behind a **Testnet Mode toggle in Settings** — UI state, not something
+an RPC can reach. So Sepolia may be refused exactly like Base Sepolia.
+
+Phase 3 now asks a third question: `wallet_addEthereumChain(0xaa36a7)`.
+
+- resolves -> Sepolia is RPC-reachable, migration unlocks Phantom
+- 4901 -> it does not; Phantom would need Testnet Mode toggled during cache-build,
+  a different piece of work. The migration might still be right for other reasons,
+  **but do not move the chain constant on the Phantom rationale.**
+
+**Re-run `pnpm run probe:phantom` before touching anything.**
+
+## 2026-08-06 (run 3) — Sepolia refused too. **Do not do the migration.**
+
+```
+0x14a34  Base Sepolia      before=0x1     rejected 4901
+0x2105   Base mainnet      before=0x1     RESOLVED (null)
+0xaa36a7 Ethereum Sepolia  before=0x2105  rejected 4901
+```
+
+### Two things this run added
+
+**1. The control was not a no-op.** The third request reports `before=0x2105` —
+the Base-mainnet add **actually switched the wallet** from `0x1`. So Phantom
+accepts *and acts on* an allowlisted chain. Run 2's open question ("did the
+control add anything, or no-op on a chain already present?") is answered: it acted.
+
+**2. An order confound, named rather than hidden.** All three requests share one
+provider in sequence, so state carried: Base Sepolia was asked from `0x1`,
+Ethereum Sepolia from `0x2105`. Not strictly independent trials.
+
+The conclusion probably survives — the same 4901 came back from two *different*
+starting chains, which is what you would expect if the code concerns the
+REQUESTED chain rather than the current one. But "probably" has a job boundary:
+
+- **enough** to make a planning decision (cost of wrongly cancelling a migration:
+  one CI run)
+- **not enough** to publish a claim about a vendor's product
+
+Before any of this reaches the matrix: each request in its own fresh context,
+order randomised. The probe now prints the confound when it detects it.
+
+### DECISION: the Ethereum Sepolia migration is CANCELLED
+
+Its rationale was a stack of three, and only one mattered:
+
+| reason | status |
+|---|---|
+| unlock the Phantom column | **DEAD** — Sepolia refused over RPC, same as Base Sepolia |
+| put all wallets on one comparable chain | moot; Phantom cannot join either way |
+| anything wrong with Base Sepolia today | **nothing.** MetaMask 4/4, Rabby 3/4 on it |
+
+Moving the chain constant now costs a CI re-run of two green columns and buys
+**nothing**. Base Sepolia stays.
+
+### What a Phantom column would actually cost, stated before anyone commits
+
+Phantom refuses every testnet over RPC. Reaching one means toggling **Testnet Mode
+in Settings during cache-build** — UI automation, not an RPC call. That needs:
+
+- `utils/phantom-onboarding.ts` (phase 1 has the entry point: *"I Already Have a
+  Wallet"*, and testIds=2 for the whole page, so text/role selectors as with Rabby)
+- settings navigation to Developer Settings, plus a toggle
+- and **even then** it may expose only Ethereum Sepolia, not Base Sepolia — which
+  would put the Phantom column on a different chain from the other two, i.e. not
+  comparable, which was the whole objection in the first place
+
+That is Rabby-scale work (Rabby: 6x MetaMask, 8 CI iterations) for a column that
+may not be comparable when finished.
+
+### AND THE FINDING IS ALREADY BANKED — no cell required
+
+Three probe runs, zero cells, and the publishable result is already in hand:
+
+| wallet | posture toward an unknown chain |
+|---|---|
+| MetaMask | adds it, standard approval dialog |
+| Rabby | adds it, security warning, primary button **disabled** until "Ignore all" |
+| Phantom | **refuses from a static allowlist — no wallet, no dialog, no user asked** |
+
+Plus: **three separate vendors now observed claiming `isMetaMask`** (OneKey,
+Rabby, Phantom), the Phantom one on its own EIP-6963-announced provider in a
+single-extension profile.
+
+Neither of those needed a single matrix cell. The column is the expensive way to
+learn less.
+
+**Recommendation: stop the Phantom column here, write the comparison up, and go
+back to the shared connect path** — which unblocks a real cell (Rabby/connect,
+7/16 → 8/16) and closes the last known asymmetry in the method.
+
+---
+
+## 2026-08-07 (Fri) — ONE connect path. `utils/connect-flow.ts`.
+
+Phantom stopped at the finding; back to the thing that unblocks a real cell.
+
+### The audit found SIX asymmetries, not one
+
+The blocked cell's note named the ordering question. Reading both paths side by
+side found five more, and any of them can move a verdict:
+
+| # | MetaMask path | Rabby path |
+|---|---|---|
+| 1 | `connectToDapp` → **`approveFollowUpRequests`** → `ensureNetwork` | `connectToDapp` → `ensureNetwork` — **no middle step** |
+| 2 | settle poll **60s** | settle poll **45s** |
+| 3 | `evalAddChain(rdns)` — **no legacy fallback, by design** | inlined string doing **`chosen \|\| window.ethereum`** |
+| 4 | provider-resolution wait per provider-eval | hand-rolled 800ms |
+| 5 | `connect.metaMaskOption` from selectors | inline `getByRole(/rabby/i)` |
+| 6 | `helpers.currentChainId` | its own local copy |
+
+**#1 is the leading hypothesis.** That middle call is a chance to consume Aave's
+own mid-connect Fuji request BEFORE our add-chain goes out. One column had it and
+is green; the other did not and is blocked.
+
+**#3 is independently serious.** Three vendors are now observed claiming
+`isMetaMask` on the legacy slot (OneKey 07-21, Rabby 07-26, Phantom 08-06), so a
+`|| window.ethereum` fallback can silently target the wrong wallet. Same defect
+class already found and fixed once in `authorisedAccount` — fixing a bug is not
+fixing every instance of it, a lesson this file already records once.
+
+### What shipped
+
+- **`utils/connect-flow.ts`** — one `connectWallet` / `ensureNetwork` /
+  `currentChainId`, with a `WalletDriver` holding the only genuinely per-wallet
+  parts (rdns, Aave's option locator, `connectToDapp`, `approveFollowUp`).
+  Settle budget unified at **60s**, the more generous of the two, so the change
+  cannot fail a previously-green cell for want of time.
+- **`CHAIN_REQUEST_HOOK`** — installed via `addInitScript` in `fixtures/rabby.ts`,
+  it wraps every announced provider's `request` in place and logs each
+  `wallet_addEthereumChain` / `wallet_switchEthereumChain` with a timestamp, chain
+  id, rdns and a caller heuristic. Aave's calls and ours land in ONE log on ONE
+  clock. **This is the measurement the cell has been waiting on** — the ordering
+  has been guessed at twice and measured never.
+- **`aave.rabby.spec.ts`** — the three local functions replaced by thin wrappers
+  delegating to the shared ones. Every call site untouched; 431 → 360 lines.
+
+### A bug in the new module, caught by reading signatures instead of assuming them
+
+The first `WalletDriver` draft had `approveFollowUp(context, extensionId,
+expectedChainIdDec)` and passed `BASE_SEPOLIA.chainId`. But both wallets'
+`approveFollowUpRequests` are `(context, extensionId, max = 3, firstTimeoutMs)` —
+**the third argument is a request COUNT.** That call would have set the loop
+ceiling to 84,532.
+
+The chain guard already lives one level down: both call
+`decideChainDialog(reading, expectedChainIdDec = TARGET_CHAIN_ID)`, and
+`TARGET_CHAIN_ID === BASE_SEPOLIA.chainId`. Passing it from the driver would have
+been a second source of truth for one value. Parameter removed.
+
+### MIGRATION ORDER — deliberate
+
+The shared module reproduces **the MetaMask path's behaviour**, because that
+column is 4/4 green and is the only connect implementation known to work end to
+end. Rabby moves first (its cell is already blocked, nothing to lose). MetaMask
+moves after, as a no-op refactor verified by CI staying 4/4. Changing both at once
+would leave no way to attribute a regression.
+
+Adopting the green column's behaviour is a starting point, **not** a claim that
+the extra approval step is correct. That is what the trace is for.
+
+### NEXT — in this order
+1. `pnpm run typecheck` locally (the sandbox has no tsc).
+2. Push `matrix-runner`, run the Matrix workflow. **Read the `[chain-order]`
+   block before anything else** — it answers the ordering question directly.
+3. Then, and only then, decide the Rabby connect cell. Expected outcomes:
+   - chip appears → the asymmetry WAS the harness; record `pass` and the earlier
+     `fail` is retrospectively confirmed as ours, not Aave's
+   - chip still absent with the wallet authorised on 84532 → now a real
+     dApp-level finding, on a symmetric harness, and it can go to `aave/interface`
+   - either way the trace says which request landed first, which is the thing the
+     note demanded
+4. Only after Rabby is settled: move `aave.metamask.spec.ts` onto the shared path
+   and confirm CI is still 4/4.
+
+**Do not record a verdict from a local run.** Cells are earned in CI — settled
+2026-07-26 by the laptop-all-red / CI-all-green natural experiment.
+
+## 2026-08-07 — typecheck failure was MINE, not a finding. Plus `docs/REPRODUCE.md`.
+
+`pnpm run typecheck` returned 14 errors. André's instruction was right: do not
+call it a bug until it is proven one. It is not a bug in anything — it is my code
+failing this repo's own strictness.
+
+**All 14 in ONE file** (`scripts/probe-provider-identity.ts`), **one root cause**:
+`noUncheckedIndexedAccess: true` makes `record[key]` yield `string | undefined`,
+and the draft indexed straight in.
+
+Two things worth stating plainly:
+
+- **`utils/connect-flow.ts`, `fixtures/rabby.ts` and `aave.rabby.spec.ts`
+  typechecked clean.** The connect-path work — the part that touches the matrix —
+  had no errors. The failures were confined to a standalone probe that no cell
+  depends on.
+- **Fixed properly, not cast away.** `as string` would have silenced the exact
+  flag that catches "I assumed this key was there" — the same shape of assumption
+  the identity probe exists to test. Replaced the `Record` with a list of
+  `{name, path}` narrowed through `find`, and the results `Record` with a `Map`
+  whose `.get()` forces the code to say what it does about a miss.
+
+Verified in the sandbox at the same strictness: **TS2322/TS2532/TS2538 count
+14 → 0.** A full `pnpm run typecheck` still has to run on the laptop, because the
+sandbox has no `@types/node` (pnpm's store does not materialise here) and the
+residual `TS2580 Cannot find name 'process'` errors appear in pre-existing files
+that compile fine locally.
+
+### `docs/REPRODUCE.md` — new
+
+A step-by-step manual runbook with an **expected result for every step**, so a
+surprising output can be compared against something rather than diagnosed from
+memory. Covers environment, wallet builds, caches, both probes, local vs CI matrix
+runs, and how to read the new chain-order trace.
+
+Two parts carry most of the value:
+
+- **A ranked evidence hierarchy.** Screenshot > raw verbatim values > control run
+  > logs, each justified by a specific occasion in this file where the lower tier
+  failed and the higher one settled it.
+- **A "what may be concluded from what" table**, and the standing rule that when
+  an observed result is not in the runbook, the honest report is *"unexpected
+  output, cause unknown"* with the raw evidence — not a diagnosis.
+
+It also records the three Phantom **non-defects** (`popup.html` closing,
+`notification.html` blank, `index.html` absent) so the three probe runs already
+spent learning that they are normal empty states are never spent again.

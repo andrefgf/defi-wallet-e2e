@@ -165,6 +165,28 @@ async function snap(page: Page, name: string) {
   await page.screenshot({ path: path.join(OUT, `${name}.png`), fullPage: true }).catch(() => {})
 }
 
+/**
+ * WHICH MARKET DID WE ACTUALLY GET?
+ *
+ * Added after a multi-market run produced three byte-identical results that
+ * looked like strong corroboration and proved nothing. `marketName` values were
+ * guessed from a pattern; only `proto_base_sepolia_v3` was ever verified. An
+ * invalid value makes Aave fall back to its default market — so "identical
+ * behaviour across three markets" and "the same page three times" are the same
+ * observation, and the probe could not tell them apart.
+ *
+ * Never again run a comparison without recording what was actually compared.
+ */
+const MARKET_LABEL = `(() => {
+  var best = 'UNKNOWN'
+  var els = document.querySelectorAll('h1,h2,h3,h4,button,span,div')
+  for (var i = 0; i < els.length; i++) {
+    var t = (els[i].textContent || '').replace(/\\s+/g, ' ').trim()
+    if (/\\bmarket\\b/i.test(t) && t.length > 3 && t.length < 40) { best = t; break }
+  }
+  return { label: best, url: window.location.href, testnets: localStorage.getItem('testnetsEnabled') }
+})()`
+
 /** `waitFor`, never `isVisible` — the latter ignores its timeout. */
 async function chipVisible(page: Page, timeout: number): Promise<boolean> {
   return connect
@@ -172,6 +194,58 @@ async function chipVisible(page: Page, timeout: number): Promise<boolean> {
     .waitFor({ state: 'visible', timeout })
     .then(() => true)
     .catch(() => false)
+}
+
+// --- instrumentation --------------------------------------------------------
+
+const T0 = Date.now()
+
+/** Every line carries elapsed seconds, so a hang is visible in the gap. */
+function step(msg: string): void {
+  const s = ((Date.now() - T0) / 1000).toFixed(1).padStart(6)
+  console.log(`[${s}s] ${msg}`)
+}
+
+/**
+ * NEVER `await page.evaluate` DIRECTLY IN THIS FILE.
+ *
+ * Every evaluate here talks to a wallet, and a wallet promise settles only when
+ * the wallet answers. `page.evaluate` puts NO timeout on a returned promise, so
+ * one unanswered request hangs the entire run with nothing on stdout.
+ *
+ * This is the THIRD time that pattern has cost a run:
+ *   - CI #11 died at the 60-minute job ceiling on an unbounded add-chain await.
+ *   - helpers.ts carried the same latent bug (fixed 2026-07-30).
+ *   - run 8 of this probe hung silently at "BOTH PROVIDERS, BEFORE CONNECT",
+ *     which is what prompted this wrapper.
+ *
+ * Fixing the instance is not fixing the pattern. Everything goes through here:
+ * a ceiling, a label, and a printed elapsed time on both sides of the call.
+ */
+async function bounded<T>(
+  page: Page,
+  label: string,
+  body: string,
+  ms = 30_000,
+): Promise<T | 'TIMEOUT'> {
+  step(`  → ${label}`)
+  const started = Date.now()
+  const result = await withTimeout<T | 'TIMEOUT'>(
+    page
+      .evaluate(body)
+      .then((v) => v as T)
+      .catch((e: Error) => `ERR ${e.message}` as unknown as T),
+    ms,
+    'TIMEOUT',
+  )
+  const took = ((Date.now() - started) / 1000).toFixed(1)
+  if (result === 'TIMEOUT') {
+    step(`  ✕ ${label} TIMED OUT after ${took}s — wallet never answered`)
+    await snap(page, `TIMEOUT-${label.replace(/\W+/g, '_')}`)
+  } else {
+    step(`  ← ${label} ok (${took}s)`)
+  }
+  return result
 }
 
 /**
@@ -350,22 +424,75 @@ async function main() {
     console.log(`\nanalytics consent dismissed: ${consent}`)
     await snap(page, '0-loaded')
 
+    // Record what we actually loaded, before measuring anything against it.
+    step(`requested: ${DAPP}`)
+    const market = (await bounded(page, 'identify market', MARKET_LABEL, 15_000)) as {
+      label?: string
+      url?: string
+      testnets?: string
+    }
+    step(`landed on : ${market.url ?? '?'}`)
+    step(`market UI : ${market.label ?? '?'}   (testnetsEnabled=${market.testnets ?? '?'})`)
+    if (DAPP.includes('marketName=') && market.url && !market.url.includes('marketName=')) {
+      step('  ⚠ marketName was DROPPED from the URL — Aave fell back to a default market.')
+      step('    Any cross-market comparison from this run is meaningless.')
+    }
+
     // The connect EVENT only fires on a cold connect. Run 2 landed on an
     // already-authorised session and measured the reconnect path by accident.
-    console.log('\n=== 0. TEAR DOWN ANY EXISTING SESSION ===')
+    step('=== 0. TEAR DOWN ANY EXISTING SESSION ===')
     const teardown = await ensureDisconnected(page)
     console.log(`  ${teardown}`)
     await snap(page, '0b-after-disconnect')
 
-    console.log('\n=== 1. PROVIDER IDENTITY ===')
-    const identity = (await page.evaluate(INSTALL_LISTENERS)) as Record<string, unknown>
+    step('=== 1. PROVIDER IDENTITY ===')
+    const identity = (await bounded(page, 'install listeners', INSTALL_LISTENERS, 20_000)) as Record<string, unknown>
     console.log(JSON.stringify(identity, null, 2))
 
-    console.log('\n=== 2. BOTH PROVIDERS, BEFORE CONNECT ===')
-    const before = (await page.evaluate(POLL_BOTH)) as Record<string, unknown>
+    step('=== 2. BOTH PROVIDERS, BEFORE CONNECT ===')
+    const before = (await bounded(page, 'poll both (before connect)', POLL_BOTH, 25_000)) as Record<string, unknown>
     console.log(JSON.stringify(before, null, 2))
 
-    console.log('\n=== 3. CONNECT ===')
+    // ---------------------------------------------------------------------
+    // PRECONDITION GATE — abort rather than measure a broken wallet.
+    //
+    // Run 8 produced a confident, WRONG verdict: "no events fired, the wallet
+    // never notified anyone — notify Rabby". Every provider call had in fact
+    // returned `ERR wallet must has at least one account`. The profile was
+    // EMPTY. Nothing could connect, so of course nothing fired, and the
+    // verdict function read that silence as a finding about a vendor.
+    //
+    // Both providers "agreed" — on an error string. Zero events "fired" —
+    // because zero happened. Every downstream signal was consistent with a
+    // real defect and every one of them was an artifact.
+    //
+    // This is the same class of error as the retracted matrix cell, committed
+    // by the tool built to prevent it. A verdict function must be able to say
+    // "this run measured nothing", or it will eventually accuse someone.
+    // ---------------------------------------------------------------------
+    const acctProbe = JSON.stringify([
+      (before as { rdnsAccounts?: unknown }).rdnsAccounts,
+      (before as { legacyAccounts?: unknown }).legacyAccounts,
+      (before as { rdnsChainId?: unknown }).rdnsChainId,
+    ])
+    if (/ERR |NO PROVIDER|must has at least one account/i.test(acctProbe)) {
+      await snap(page, 'INVALID-no-account')
+      console.log('\n================ RUN INVALID ================')
+      console.log('  The wallet has no usable account. This run measures NOTHING.')
+      console.log(`  provider said: ${acctProbe}`)
+      console.log('')
+      console.log('  NO VERDICT WILL BE EMITTED. Silence from an empty wallet is not')
+      console.log('  evidence about Rabby, about Aave, or about anything else.')
+      console.log('')
+      console.log('  Fix the profile, then re-run:')
+      console.log('    Remove-Item -Recurse -Force .\\.wallet-cache\\rabby')
+      console.log('    pnpm run build:cache:rabby      # must print: connected: ["0x..."]')
+      console.log('    pnpm probe:rabby:event')
+      console.log('=============================================')
+      throw new Error('INVALID RUN — wallet has no account; refusing to emit a verdict')
+    }
+
+    step('=== 3. CONNECT ===')
     await openWalletPicker(page)
     await page.waitForTimeout(1500)
     const rabbyOption = page.getByRole('button', { name: /rabby/i }).first()
@@ -375,8 +502,8 @@ async function main() {
     await page.waitForTimeout(10_000)
     await snap(page, '1-after-connect')
 
-    console.log('\n=== 4. BOTH PROVIDERS, AFTER CONNECT ===')
-    const after = (await page.evaluate(POLL_BOTH)) as Record<string, unknown>
+    step('=== 4. BOTH PROVIDERS, AFTER CONNECT ===')
+    const after = (await bounded(page, 'poll both (after connect)', POLL_BOTH, 25_000)) as Record<string, unknown>
     console.log(JSON.stringify(after, null, 2))
 
     // --- reproduce CI conditions -------------------------------------------
@@ -390,7 +517,7 @@ async function main() {
     // So put the wallet where CI had it, then ask again. This is the step that
     // separates "Aave ignores a correct connection" from "Aave declines to
     // render an account on an unsupported chain".
-    console.log('\n=== 4b. SWITCH TO BASE SEPOLIA (reproduce CI #14) ===')
+    step('=== 4b. SWITCH TO BASE SEPOLIA (reproduce CI #14) ===')
     const beforeSwitch = await chipVisible(page, 3000)
     console.log(`  chip before switch: ${beforeSwitch}`)
 
@@ -430,7 +557,7 @@ async function main() {
     const deadline = Date.now() + 45_000
     let onTarget = false
     while (Date.now() < deadline) {
-      const now = (await page.evaluate(POLL_BOTH)) as { rdnsChainId?: string }
+      const now = (await bounded(page, 'chain poll', POLL_BOTH, 15_000)) as { rdnsChainId?: string }
       if (now.rdnsChainId === BASE_SEPOLIA.chainIdHex) {
         onTarget = true
         break
@@ -441,12 +568,12 @@ async function main() {
     await page.waitForTimeout(6000)
     await snap(page, '2-after-chain-switch')
 
-    console.log('\n=== 4c. BOTH PROVIDERS, ON BASE SEPOLIA ===')
-    const onChain = (await page.evaluate(POLL_BOTH)) as Record<string, unknown>
+    step('=== 4c. BOTH PROVIDERS, ON BASE SEPOLIA ===')
+    const onChain = (await bounded(page, 'poll both (on base sepolia)', POLL_BOTH, 25_000)) as Record<string, unknown>
     console.log(JSON.stringify(onChain, null, 2))
 
-    console.log('\n=== 5. EVENTS + WAGMI STORAGE ===')
-    const state = (await page.evaluate(FINAL_STATE)) as Record<string, unknown>
+    step('=== 5. EVENTS + WAGMI STORAGE ===')
+    const state = (await bounded(page, 'final state + storage', FINAL_STATE, 25_000)) as Record<string, unknown>
     const events = state.events as { src: string; name: string; payload: string; msAfterInstall: number }[]
     console.log(`  events observed: ${events.length}`)
     events.forEach((e) => console.log(`    +${e.msAfterInstall}ms [${e.src}] ${e.name} ${e.payload}`))

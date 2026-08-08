@@ -93,12 +93,91 @@ export function rabbyProfilePath(): string {
   return path.join(CACHE_DIR, `rabby-profile-${hash}`)
 }
 
+// ---------------------------------------------------------------------------
+// Phantom
+//
+// Phantom is the first wallet in this repo that CANNOT be version-pinned: it
+// ships through the Chrome Web Store only and publishes no downloadable build,
+// so `fetch-phantom.mjs` pulls the current one from Google's CRX endpoint. The
+// cache directory is therefore named `-latest` rather than carrying a version,
+// and the version has to be READ at run time and recorded per cell.
+//
+// Read `scripts/fetch-phantom.mjs`'s header before changing any of this.
+// ---------------------------------------------------------------------------
+
+/** Path to the unpacked Phantom extension. Root or one level down, as Rabby. */
+export function phantomExtensionPath(): string {
+  const base = path.join(CACHE_DIR, 'phantom-chrome-latest')
+  if (fs.existsSync(path.join(base, 'manifest.json'))) return base
+
+  if (fs.existsSync(base)) {
+    for (const entry of fs.readdirSync(base)) {
+      const nested = path.join(base, entry)
+      if (
+        fs.statSync(nested).isDirectory() &&
+        fs.existsSync(path.join(nested, 'manifest.json'))
+      ) {
+        return nested
+      }
+    }
+  }
+  throw new Error(`Phantom not found at ${base}. Run: pnpm run fetch:phantom`)
+}
+
+/**
+ * The Phantom build actually on disk.
+ *
+ * This is not decoration. Phantom cannot be pinned, so this string is the ONLY
+ * thing that makes a Phantom cell reproducible after the fact — it must be
+ * written into `wallet_version` in matrix/data/results.csv for every cell.
+ */
+export function phantomVersion(): string {
+  const manifest = JSON.parse(
+    fs.readFileSync(path.join(phantomExtensionPath(), 'manifest.json'), 'utf8'),
+  ) as { version?: string }
+  return manifest.version ?? 'unknown'
+}
+
+/**
+ * The cached Phantom profile.
+ *
+ * Keyed on seed + password + the RESOLVED build version, so a Web Store update
+ * silently invalidates the cache instead of leaving a profile built by an older
+ * Phantom in place. That matters more here than for the pinned wallets, because
+ * the version can change underneath us without anyone editing a file.
+ */
+export function phantomProfilePath(): string {
+  const seed = process.env.PHANTOM_SEED_PHRASE
+  const password = process.env.PHANTOM_WALLET_PASSWORD
+  if (!seed || !password) {
+    throw new Error('PHANTOM_SEED_PHRASE and PHANTOM_WALLET_PASSWORD must be set (see .env.example)')
+  }
+  const hash = crypto
+    .createHash('sha256')
+    .update(`${seed}::${password}::${phantomVersion()}`)
+    .digest('hex')
+    .slice(0, 16)
+  return path.join(CACHE_DIR, `phantom-profile-${hash}`)
+}
+
 /** Chromium args to load a specific unpacked extension. */
 export function browserArgsFor(extensionPath: string): string[] {
-  const args = [
-    `--disable-extensions-except=${extensionPath}`,
-    `--load-extension=${extensionPath}`,
-  ]
+  return browserArgsForAll([extensionPath])
+}
+
+/**
+ * Chromium args to load SEVERAL unpacked extensions, in a stated order.
+ *
+ * Chromium takes a comma-separated list. Whether that list order actually
+ * determines injection order is NOT something to assume — it is the thing
+ * `scripts/probe-provider-identity.ts` exists to measure. Load order and
+ * injection order are different claims, and conflating them is how you end up
+ * asserting "install order decides window.ethereum" without ever having varied
+ * the order.
+ */
+export function browserArgsForAll(extensionPaths: string[]): string[] {
+  const joined = extensionPaths.join(',')
+  const args = [`--disable-extensions-except=${joined}`, `--load-extension=${joined}`]
   if (process.env.HEADLESS) args.push('--headless=new')
   return args
 }
